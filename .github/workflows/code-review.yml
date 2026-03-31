@@ -1,0 +1,45 @@
+# Reusable Code Review workflow
+# Called by other rc-international repos via:
+#   uses: rc-international/ci/.github/workflows/code-review.yml@main
+#   secrets: inherit
+
+name: Code Review
+
+on:
+  workflow_call:
+    secrets:
+      CEREBRAS_API_KEY:
+        required: true
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  code-review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout calling repo
+        uses: actions/checkout@v4
+
+      - name: Checkout CI scripts
+        uses: actions/checkout@v4
+        with:
+          repository: rc-international/ci
+          path: .ci
+          sparse-checkout: |
+            scripts/ci-review.ts
+            scripts/lib/
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Run CI code review
+        env:
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: bun .ci/scripts/ci-review.ts
