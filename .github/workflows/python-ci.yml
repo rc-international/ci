@@ -1,0 +1,78 @@
+# Reusable Python CI workflow
+# Called by other rc-international repos via:
+#   uses: rc-international/ci/.github/workflows/python-ci.yml@main
+#   with:
+#     python-version: "3.12"
+
+name: Python CI
+
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        description: Python version to use
+        type: string
+        default: "3.12"
+      src-dir:
+        description: Source directory to lint/typecheck
+        type: string
+        default: "src"
+      test-dir:
+        description: Test directory
+        type: string
+        default: "tests"
+      run-mypy:
+        description: Run mypy type checking
+        type: boolean
+        default: true
+      extra-deps:
+        description: Extra pip packages to install (space-separated)
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]" ${{ inputs.extra-deps }}
+
+      - name: Lint with ruff
+        run: ruff check ${{ inputs.src-dir }}/ ${{ inputs.test-dir }}/
+
+      - name: Check formatting with black
+        run: black --check ${{ inputs.src-dir }}/ ${{ inputs.test-dir }}/
+
+      - name: Type check with mypy
+        if: ${{ inputs.run-mypy }}
+        run: mypy ${{ inputs.src-dir }}/ --ignore-missing-imports
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]" ${{ inputs.extra-deps }}
+
+      - name: Run tests
+        run: pytest ${{ inputs.test-dir }}/ --cov=${{ inputs.src-dir }} --cov-report=xml -v
