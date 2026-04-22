@@ -255,9 +255,8 @@ async function callCerebras(
 // ── Review formatting ───────────────────────────────────────────────────────
 
 function reviewEvent(findings: ReviewFinding[]): 'REQUEST_CHANGES' | 'COMMENT' | 'APPROVE' {
-  if (findings.length === 0) return 'COMMENT'
   const hasCriticalOrHigh = findings.some((f) => f.severity === 'critical' || f.severity === 'high')
-  return hasCriticalOrHigh ? 'REQUEST_CHANGES' : 'COMMENT'
+  return hasCriticalOrHigh ? 'REQUEST_CHANGES' : 'APPROVE'
 }
 
 interface FormatOptions {
@@ -420,8 +419,8 @@ async function main(): Promise<void> {
     await postPrReview(
       prNumber,
       repo,
-      'COMMENT',
-      '## Automated Code Review\n\nNo changes to review.'
+      'APPROVE',
+      '## Automated Code Review\n\nNo changes to review — approved.'
     )
     process.exit(0)
   }
@@ -431,8 +430,8 @@ async function main(): Promise<void> {
     await postPrReview(
       prNumber,
       repo,
-      'COMMENT',
-      '## Automated Code Review\n\nNo code changes to review (documentation only).'
+      'APPROVE',
+      '## Automated Code Review\n\nNo code changes to review (documentation only) — approved.'
     )
     process.exit(0)
   }

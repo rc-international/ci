@@ -2,6 +2,11 @@
 # Called by other rc-international repos via:
 #   uses: rc-international/ci/.github/workflows/code-review.yml@main
 #   secrets: inherit
+#
+# Submits reviews as valors-release-bot (via the RELEASE_APP_ID/PRIVATE_KEY org
+# secrets) so that APPROVE reviews count toward the required-approving-review
+# count in branch protection. GITHUB_TOKEN-submitted reviews are explicitly
+# excluded by GitHub from satisfying the review requirement.
 
 name: Code Review
 
@@ -9,6 +14,10 @@ on:
   workflow_call:
     secrets:
       CEREBRAS_API_KEY:
+        required: true
+      RELEASE_APP_ID:
+        required: true
+      RELEASE_APP_PRIVATE_KEY:
         required: true
 
 permissions:
@@ -19,8 +28,18 @@ jobs:
   code-review:
     runs-on: ubuntu-latest
     steps:
+      - name: Generate app token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
       - name: Checkout calling repo
         uses: actions/checkout@v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
 
       - name: Checkout CI scripts
         uses: actions/checkout@v4
@@ -30,6 +49,7 @@ jobs:
           sparse-checkout: |
             scripts/ci-review.ts
             scripts/lib/
+          token: ${{ steps.app-token.outputs.token }}
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -39,7 +59,7 @@ jobs:
       - name: Run CI code review
         env:
           CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: bun .ci/scripts/ci-review.ts
