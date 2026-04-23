@@ -26,6 +26,13 @@ permissions:
 
 jobs:
   code-review:
+    # Skip LLM review on dependabot PRs. Dependabot PRs run in a reduced-
+    # permission context that can't read org Actions secrets (CEREBRAS_API_KEY,
+    # RELEASE_APP_ID/PRIVATE_KEY), so the workflow startup-fails. Even if we
+    # mirrored the secrets, LLM-reviewing a machine-generated version or
+    # security bump adds no signal beyond GitHub's advisory DB — the diff is
+    # always a version string + lockfile churn.
+    if: github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: ubuntu-latest
     steps:
       - name: Generate app token
