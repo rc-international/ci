@@ -26,17 +26,25 @@ permissions:
 
 jobs:
   code-review:
-    # Skip LLM review on dependabot PRs. Dependabot PRs run in a reduced-
-    # permission context that can't read org Actions secrets (CEREBRAS_API_KEY,
-    # RELEASE_APP_ID/PRIVATE_KEY), so the workflow startup-fails. Even if we
-    # mirrored the secrets, LLM-reviewing a machine-generated version or
-    # security bump adds no signal beyond GitHub's advisory DB — the diff is
-    # always a version string + lockfile churn.
-    if: github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: ubuntu-latest
     steps:
+      # Skip LLM review on dependabot PRs. Dependabot PRs run in a reduced-
+      # permission context that can't read org Actions secrets (CEREBRAS_API_KEY,
+      # RELEASE_APP_ID/PRIVATE_KEY), so the workflow startup-fails. Even if we
+      # mirrored the secrets, LLM-reviewing a machine-generated version or
+      # security bump adds no signal beyond GitHub's advisory DB — the diff is
+      # always a version string + lockfile churn.
+      #
+      # The skip is per-step (not job-level) so the job still completes with
+      # SUCCESS rather than SKIPPED. A SKIPPED required check counts as
+      # not-passing in branch protection and would block dependabot PRs.
+      - name: Skip notice (dependabot)
+        if: github.event.pull_request.user.login == 'dependabot[bot]'
+        run: echo "Skipping LLM code review for dependabot PR."
+
       - name: Generate app token
         id: app-token
+        if: github.event.pull_request.user.login != 'dependabot[bot]'
         uses: actions/create-github-app-token@v1
         with:
           app-id: ${{ secrets.RELEASE_APP_ID }}
@@ -44,11 +52,13 @@ jobs:
           owner: ${{ github.repository_owner }}
 
       - name: Checkout calling repo
+        if: github.event.pull_request.user.login != 'dependabot[bot]'
         uses: actions/checkout@v4
         with:
           token: ${{ steps.app-token.outputs.token }}
 
       - name: Checkout CI scripts
+        if: github.event.pull_request.user.login != 'dependabot[bot]'
         uses: actions/checkout@v4
         with:
           repository: rc-international/ci
@@ -59,11 +69,13 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
 
       - name: Setup Bun
+        if: github.event.pull_request.user.login != 'dependabot[bot]'
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
 
       - name: Run CI code review
+        if: github.event.pull_request.user.login != 'dependabot[bot]'
         env:
           CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
