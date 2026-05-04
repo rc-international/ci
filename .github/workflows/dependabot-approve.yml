@@ -47,7 +47,8 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
-          gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" \
-            --method POST \
-            -f event=APPROVE \
-            -f body="Dependabot version bump auto-approved. LLM review skipped per code-review.yml — version-string + lockfile diffs add no signal beyond GitHub's advisory DB."
+          # Use the same JSON-via-stdin pattern as scripts/ci-review.ts so
+          # behaviour is identical to the existing valors-release-bot APPROVE
+          # path (proven working on hundreds of clean human PRs).
+          jq -n '{event: "APPROVE", body: "Dependabot version bump auto-approved. LLM review skipped per code-review.yml — version-string + lockfile diffs add no signal beyond GitHub'\''s advisory DB."}' \
+            | gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" --method POST --input -
