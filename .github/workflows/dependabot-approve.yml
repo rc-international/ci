@@ -1,0 +1,53 @@
+# Reusable Dependabot Auto-Approve workflow
+# Called by other rc-international repos via:
+#   uses: rc-international/ci/.github/workflows/dependabot-approve.yml@main
+#   secrets: inherit
+#
+# Submits an APPROVE review as valors-release-bot (via the RELEASE_APP_ID /
+# RELEASE_APP_PRIVATE_KEY org secrets) so Dependabot PRs satisfy the
+# `required_approving_review_count` branch-protection rule. GITHUB_TOKEN
+# reviews are explicitly excluded by GitHub from satisfying that rule, hence
+# the app token.
+#
+# Triggered via `pull_request_target` in the caller (not `pull_request`) so
+# org Actions secrets are available to the workflow. Safe because we do NOT
+# checkout PR HEAD; we only call the GitHub API to post an APPROVE.
+
+name: Dependabot Auto-Approve
+
+on:
+  workflow_call:
+    secrets:
+      RELEASE_APP_ID:
+        required: true
+      RELEASE_APP_PRIVATE_KEY:
+        required: true
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  approve:
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate app token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Post APPROVE review
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" \
+            --method POST \
+            -f event=APPROVE \
+            -f body="Dependabot version bump auto-approved. LLM review skipped per code-review.yml — version-string + lockfile diffs add no signal beyond GitHub's advisory DB."
