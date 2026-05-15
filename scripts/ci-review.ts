@@ -67,6 +67,18 @@ interface DiffInfo {
 
 // ── Diff parsing ────────────────────────────────────────────────────────────
 
+// Git emits these markers at the start of a line within a per-file diff
+// section. Substring matching alone would false-positive on text files whose
+// content happens to contain the literal phrase (e.g., a source-code comment
+// about "Binary files" or a log line `console.log("GIT binary patch")`), so
+// match line-anchored.
+const BINARY_FILES_LINE = /^Binary files .+ differ$/m
+const GIT_BINARY_PATCH_LINE = /^GIT binary patch$/m
+
+function isBinarySection(section: string): boolean {
+  return BINARY_FILES_LINE.test(section) || GIT_BINARY_PATCH_LINE.test(section)
+}
+
 function parseDiff(rawDiff: string): DiffInfo {
   if (!rawDiff || !rawDiff.trim()) {
     return { cleanDiff: '', isEmpty: true, isDocsOnly: false, wasTruncated: false, fileCount: 0 }
@@ -77,9 +89,7 @@ function parseDiff(rawDiff: string): DiffInfo {
   const fileCount = fileSections.length
 
   // Filter out binary files
-  const textSections = fileSections.filter(
-    (section) => !section.includes('Binary files') && !section.includes('GIT binary patch')
-  )
+  const textSections = fileSections.filter((section) => !isBinarySection(section))
 
   // Check if docs-only
   const filePathRegex = /^diff --git a\/(.+?) b\//m
@@ -115,13 +125,9 @@ function extractChangedFiles(rawDiff: string): string[] {
   // Split per-file and drop binary sections. Reading binary content via
   // `git show HEAD:<path>` and stuffing it into the prompt blows the Cerebras
   // context window (e.g., an image-heavy PR can push the prompt past 1MB).
-  // Binary diff sections are marked either with "Binary files … differ"
-  // (default) or "GIT binary patch" (when --binary is used), matching the
-  // same filter parseDiff applies before sending text to the LLM.
+  // Uses the same line-anchored binary-section detector as parseDiff.
   const fileSections = rawDiff.split(/^(?=diff --git )/m).filter(Boolean)
-  const textSections = fileSections.filter(
-    (section) => !section.includes('Binary files') && !section.includes('GIT binary patch')
-  )
+  const textSections = fileSections.filter((section) => !isBinarySection(section))
   const filePathRegex = /^diff --git a\/(.+?) b\//m
   const files = new Set<string>()
   for (const section of textSections) {
