@@ -112,11 +112,21 @@ function parseDiff(rawDiff: string): DiffInfo {
 // ── Full file context ───────────────────────────────────────────────────────
 
 function extractChangedFiles(rawDiff: string): string[] {
-  const filePathRegex = /^diff --git a\/(.+?) b\//gm
+  // Split per-file and drop binary sections. Reading binary content via
+  // `git show HEAD:<path>` and stuffing it into the prompt blows the Cerebras
+  // context window (e.g., an image-heavy PR can push the prompt past 1MB).
+  // Binary diff sections are marked either with "Binary files … differ"
+  // (default) or "GIT binary patch" (when --binary is used), matching the
+  // same filter parseDiff applies before sending text to the LLM.
+  const fileSections = rawDiff.split(/^(?=diff --git )/m).filter(Boolean)
+  const textSections = fileSections.filter(
+    (section) => !section.includes('Binary files') && !section.includes('GIT binary patch')
+  )
+  const filePathRegex = /^diff --git a\/(.+?) b\//m
   const files = new Set<string>()
-  let match: RegExpExecArray | null
-  while ((match = filePathRegex.exec(rawDiff)) !== null) {
-    files.add(match[1])
+  for (const section of textSections) {
+    const match = section.match(filePathRegex)
+    if (match) files.add(match[1])
   }
   return [...files]
 }
