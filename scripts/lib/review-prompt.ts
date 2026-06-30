@@ -56,6 +56,44 @@ const CATEGORY_TITLES: Record<string, string> = {
 }
 
 /**
+ * Mandatory engineering rules, injected into both buildReviewPrompt() and
+ * FALLBACK_PROMPT. Encodes the team's most frequently repeated review-finding
+ * categories so violations surface as HIGH severity (which triggers
+ * REQUEST_CHANGES and blocks merge).
+ */
+export const ENGINEERING_RULES = `### Engineering rules (mandatory — flag violations as HIGH)
+
+Evaluate the diff against the rules below. For ANY real violation visible in the diff, emit a finding with severity "high" (or "critical" for an issue that can take down a shared service or cause data loss) citing the exact file and line — a HIGH finding triggers REQUEST_CHANGES and blocks the merge until fixed. These encode the team's most frequently-repeated review findings. IMPORTANT: only flag what the changed lines actually show; do not invent violations or flag a rule that does not apply to this diff.
+
+1. Unverified assumptions. HIGH when: code, comments, log lines, or messages assert a fact or number with no basis (e.g. throughput like "235 records/hour", "this is correct", "the migration is broken") as if verified; or a calculation uses unverified inputs but is stated as a precise result instead of an estimate.
+
+2. Silent error handling. HIGH when: an empty or log-less catch — \`catch {}\`, \`catch (e) {}\` with no body, \`.catch(() => {})\`, Python \`except ...: pass\` or bare \`except:\` — swallows an error without at least a debug log that includes the error.
+
+3. Missing timeouts on I/O. HIGH when: \`fetch\`, \`net.connect\`, \`axios\`, Python \`requests\`, an upstream/proxy call, or a potentially-slow DB query is issued with no timeout/abort. Also flag direct access to external/parsed data (dict keys, indices) that can throw with no guard.
+
+4. Hardcoded environment-specific values. HIGH when: a hardcoded user-specific path (\`/home/<name>/...\`), IP address, port, channel/ID, or secret/token appears in source; or a magic number is used in non-trivial logic instead of a named constant.
+
+5. Security. HIGH when: TLS/host verification is disabled (\`NODE_TLS_REJECT_UNAUTHORIZED = '0'\`, \`verify=False\`, \`StrictHostKeyChecking=accept-new\`); SQL is built by string concatenation / f-string instead of a parameterized query; a new HTTP route/handler has no auth check; or credentials are read from an insecure location.
+
+6. Missing tests. HIGH when: a new script, module, or worker — or substantial new logic — is added with no corresponding test file or test case in the same diff.
+
+7. Production-path changes without a verification story. HIGH when: the diff touches deploy scripts, systemd units, CI workflows, DB schemas/migrations, scheduled jobs, or multi-tenant infra AND the \`## PR Body\` lacks concrete \`## Operator Deploy Steps\` and \`## Expected Outcomes\` containing at least one runnable post-deploy smoke/health command.
+
+8. Dead, duplicated, or truncated code. HIGH when: a logic block is duplicated verbatim (DRY violation); a file ends mid-statement or mid-comment (truncated edit); or code is plainly unreachable.
+
+9. Bash set -e safety. HIGH when: in a script using \`set -e\` / \`set -euo pipefail\`, an optional command (a \`grep\` that may match nothing, an optional tool) is invoked without \`|| true\` or an \`if\` guard.
+
+10. Heavy query on a shared service pool. HIGH (CRITICAL if it can invalidate a shared connection/engine for other callers): the diff adds a \`COUNT(DISTINCT ...)\`, a full-table scan, a large window/dedup, or any unbounded aggregation to a SHARED, memory-constrained request path (an HTTP API handler, a shared DB/DuckDB connection pool). A query that fits when run alone can OOM under concurrency and break the service for everyone. Prefer isolating it in its own process with its own memory_limit, or precomputing into a small materialized table.
+
+11. COUNT(DISTINCT) over large data in a hot path. HIGH: a \`COUNT(DISTINCT key)\` (or several with FILTERs) over a large or append-only history table inside an API/report/request path — it builds a hash set sized to the cardinality and cannot exploit row ordering. Materialize current-state (one row per key) and use \`COUNT(*) FILTER (...)\` instead.
+
+12. Scheduled job not verified in its real execution context. HIGH: the diff adds or changes a scheduled job (a cron entry, a systemd \`.timer\`/\`.service\`, a scheduled script/worker) and the \`## PR Body\` shows no evidence it was verified in the ACTUAL execution context (the cron/systemd environment, the real \`User=\`) rather than only an interactive shell. Interactive-only verification misses env/SSH-agent/sudo/PATH/tty differences that break the scheduled run.
+
+13. A scheduled job or report that does not fail loud. HIGH: a report or scheduled job that, on a backend error or an empty/zero result, still emits output (renders a zeros/empty table, posts a message, writes a record) instead of exiting non-zero and emitting nothing. An HTTP \`200\` or \`rc=0\` is not proof of data — validate the rows/payload before acting; emitting garbage on failure is worse than skipping the run.
+
+14. Merge-automation that ignores strict branch protection. HIGH: the diff adds or changes auto-merge / merge-automation CI (e.g. a workflow arming \`gh pr merge --auto\`) without accounting for \`strict\` ("require branch up to date") protection — under which a PR falls BEHIND when main moves and auto-merge will NOT fire until the branch is updated (needs an update-branch step or a merge queue).`
+
+/**
  * Standardized output schema description for all diff review prompts.
  * Uses snake_case to match review_findings DB columns.
  */
@@ -112,6 +150,8 @@ export const FALLBACK_PROMPT = `You are a senior code reviewer. You will receive
 - \`except Exception: pass\` or \`except: pass\` in Python
 - Errors swallowed without any logging (at minimum console.debug)
 - Missing error context: catch logs a generic message without the error object
+
+${ENGINEERING_RULES}
 
 ### Configuration
 - Hardcoded URLs, ports, file paths, email addresses, or domain-specific thresholds
@@ -185,6 +225,12 @@ export function buildReviewPrompt(yamlPath?: string): string {
       lines.push(`- ${p.description}`)
     }
   }
+
+  // Mandatory engineering rules — high-frequency review-finding categories that
+  // must gate merges. Injected here so they survive even when categories come
+  // from a per-repo YAML override.
+  lines.push('')
+  lines.push(ENGINEERING_RULES)
 
   const additionalChecks = patterns['additional-checks']
   if (additionalChecks?.length) {
