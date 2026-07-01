@@ -124,7 +124,9 @@ Evaluate the diff against the rules below. For ANY real violation visible in the
 
 14. Merge-automation that ignores strict branch protection. HIGH: the diff adds or changes auto-merge / merge-automation CI (e.g. a workflow arming \`gh pr merge --auto\`) without accounting for \`strict\` ("require branch up to date") protection — under which a PR falls BEHIND when main moves and auto-merge will NOT fire until the branch is updated (needs an update-branch step or a merge queue).
 
-15. English-only string sets in a multilingual codebase. CRITICAL when: a whitelist, category list, keyword filter, allowlist, or any hardcoded string set used to match/gate/route data is English-only while the code processes multilingual data (e.g. a fleet whose sources return Portuguese/Spanish). An English-only match silently drops non-English records — this is data loss, not a missed feature — so verify locale coverage of every hardcoded string set.`
+15. English-only string sets in a multilingual codebase. CRITICAL when: a whitelist, category list, keyword filter, allowlist, or any hardcoded string set used to match/gate/route data is English-only while the code processes multilingual data (e.g. a fleet whose sources return Portuguese/Spanish). An English-only match silently drops non-English records — this is data loss, not a missed feature — so verify locale coverage of every hardcoded string set.
+
+16. Unbounded logs. HIGH when: a new or modified app, service, script, cron job, or container writes a log with no size bound or rotation — no logrotate stanza (\`copytruncate\` for a writer that holds the fd open, \`create\` for one that reopens per run), no docker \`log-opts\` \`max-size\`/\`max-file\`, no journald \`SystemMaxUse\`, or a home-grown rotation that a short-lived / cron process never fires. Every log must have a size cap and retention.`
 
 /**
  * Standardized output schema description for all diff review prompts.
