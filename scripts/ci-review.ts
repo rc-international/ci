@@ -32,6 +32,8 @@ const MAX_DIFF_SIZE = MAX_CONTEXT_CHARS // kept as alias for parseDiff compat
 const BUDGET_PER_FILE = 50_000 // cap individual file content in context
 const RETRY_DELAY_MS = 2_000
 const MAX_RETRIES = 1
+const APPROVAL_COMMENT = 'approved'
+const TRUSTED_APPROVAL_ASSOCIATIONS = new Set(['OWNER', 'MEMBER'])
 
 const DOC_EXTENSIONS = new Set([
   '.md',
@@ -63,21 +65,14 @@ interface DiffInfo {
   fileCount: number
 }
 
+interface ManualApproval {
+  author: string
+  association: string
+}
+
 // Review patterns, prompt building, and FALLBACK_PROMPT imported from shared module
 
 // ── Diff parsing ────────────────────────────────────────────────────────────
-
-// Git emits these markers at the start of a line within a per-file diff
-// section. Substring matching alone would false-positive on text files whose
-// content happens to contain the literal phrase (e.g., a source-code comment
-// about "Binary files" or a log line `console.log("GIT binary patch")`), so
-// match line-anchored.
-const BINARY_FILES_LINE = /^Binary files .+ differ$/m
-const GIT_BINARY_PATCH_LINE = /^GIT binary patch$/m
-
-function isBinarySection(section: string): boolean {
-  return BINARY_FILES_LINE.test(section) || GIT_BINARY_PATCH_LINE.test(section)
-}
 
 function parseDiff(rawDiff: string): DiffInfo {
   if (!rawDiff || !rawDiff.trim()) {
@@ -89,7 +84,9 @@ function parseDiff(rawDiff: string): DiffInfo {
   const fileCount = fileSections.length
 
   // Filter out binary files
-  const textSections = fileSections.filter((section) => !isBinarySection(section))
+  const textSections = fileSections.filter(
+    (section) => !section.includes('Binary files') && !section.includes('GIT binary patch')
+  )
 
   // Check if docs-only
   const filePathRegex = /^diff --git a\/(.+?) b\//m
@@ -122,17 +119,11 @@ function parseDiff(rawDiff: string): DiffInfo {
 // ── Full file context ───────────────────────────────────────────────────────
 
 function extractChangedFiles(rawDiff: string): string[] {
-  // Split per-file and drop binary sections. Reading binary content via
-  // `git show HEAD:<path>` and stuffing it into the prompt blows the Cerebras
-  // context window (e.g., an image-heavy PR can push the prompt past 1MB).
-  // Uses the same line-anchored binary-section detector as parseDiff.
-  const fileSections = rawDiff.split(/^(?=diff --git )/m).filter(Boolean)
-  const textSections = fileSections.filter((section) => !isBinarySection(section))
-  const filePathRegex = /^diff --git a\/(.+?) b\//m
+  const filePathRegex = /^diff --git a\/(.+?) b\//gm
   const files = new Set<string>()
-  for (const section of textSections) {
-    const match = section.match(filePathRegex)
-    if (match) files.add(match[1])
+  let match: RegExpExecArray | null
+  while ((match = filePathRegex.exec(rawDiff)) !== null) {
+    files.add(match[1])
   }
   return [...files]
 }
@@ -166,8 +157,14 @@ function buildFileContext(changedFiles: string[]): string {
 
 const REVIEW_PROMPT = buildReviewPrompt()
 
-function buildUserMessage(diff: string, fileContext: string): string {
+function buildUserMessage(diff: string, fileContext: string, prBody = ''): string {
   const parts: string[] = []
+
+  if (prBody) {
+    parts.push('## PR Body\n\n')
+    parts.push(prBody)
+    parts.push('\n\n')
+  }
 
   if (fileContext) {
     parts.push('## Full source files (for context)\n')
@@ -188,10 +185,35 @@ function buildUserMessage(diff: string, fileContext: string): string {
   return parts.join('')
 }
 
+// ── Manual approval comments ───────────────────────────────────────────────
+
+function isApprovedComment(body: string | undefined): boolean {
+  return (body || '').trim().toLowerCase() === APPROVAL_COMMENT
+}
+
+function isTrustedApprovalAssociation(association: string | undefined): boolean {
+  return TRUSTED_APPROVAL_ASSOCIATIONS.has((association || '').trim().toUpperCase())
+}
+
+function getManualApprovalFromEnv(
+  env: Record<string, string | undefined> = process.env
+): ManualApproval | null {
+  if (env.GITHUB_EVENT_NAME !== 'issue_comment') return null
+  if (env.COMMENT_IS_PR !== 'true') return null
+  if (!isApprovedComment(env.COMMENT_BODY)) return null
+  if (!isTrustedApprovalAssociation(env.COMMENT_AUTHOR_ASSOCIATION)) return null
+
+  return {
+    author: env.COMMENT_AUTHOR || 'unknown',
+    association: (env.COMMENT_AUTHOR_ASSOCIATION || '').trim().toUpperCase(),
+  }
+}
+
 async function callCerebras(
   apiKey: string,
   diff: string,
-  fileContext: string
+  fileContext: string,
+  prBody = ''
 ): Promise<CerebrasResult> {
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     if (attempt > 0) {
@@ -215,7 +237,7 @@ async function callCerebras(
             { role: 'system', content: REVIEW_PROMPT },
             {
               role: 'user',
-              content: buildUserMessage(diff, fileContext),
+              content: buildUserMessage(diff, fileContext, prBody),
             },
           ],
           temperature: 0.1,
@@ -367,8 +389,24 @@ function getPrCommitMessages(prNumber: string): string[] {
       { encoding: 'utf-8', timeout: 10_000 }
     )
     return json.trim().split('\n').filter(Boolean)
-  } catch {
+  } catch (err) {
+    console.debug(`[ci-review] PR commit messages fetch failed for #${prNumber}:`, err)
     return []
+  }
+}
+
+function getPrBody(prNumber: string): string {
+  try {
+    return execSync(`gh pr view ${prNumber} --json body --jq '.body'`, {
+      encoding: 'utf-8',
+      timeout: 5_000,
+      maxBuffer: 200_000,
+    }).trim()
+  } catch (err) {
+    console.warn(
+      `[ci-review] PR body fetch failed for #${prNumber}: ${err instanceof Error ? err.message : err}`
+    )
+    return ''
   }
 }
 
@@ -406,6 +444,28 @@ async function main(): Promise<void> {
   if (!prNumber || !repo) {
     console.error('[ci-review] PR_NUMBER and GITHUB_REPOSITORY must be set')
     process.exit(1)
+  }
+
+  if (process.env.GITHUB_EVENT_NAME === 'issue_comment') {
+    const manualApproval = getManualApprovalFromEnv()
+    if (!manualApproval) {
+      console.log('[ci-review] Issue comment is not a trusted PR approval; skipping review.')
+      process.exit(0)
+    }
+
+    await postPrReview(
+      prNumber,
+      repo,
+      'APPROVE',
+      [
+        '## Manual Code Review Approval',
+        '',
+        `Accepted \`${APPROVAL_COMMENT}\` comment from rc-int ${manualApproval.association.toLowerCase()} \`${manualApproval.author}\`.`,
+        '',
+        'This is the manual fallback for times when the Cerebras automated review is unavailable.',
+      ].join('\n')
+    )
+    process.exit(0)
   }
 
   // Read diff from stdin or file argument
@@ -458,7 +518,7 @@ async function main(): Promise<void> {
       prNumber,
       repo,
       'COMMENT',
-      '## Automated Code Review\n\nAutomated review skipped -- API unavailable.'
+      `## Automated Code Review\n\nAutomated review skipped -- API unavailable.\n\nAn rc-int member can comment \`${APPROVAL_COMMENT}\` to manually approve this PR.`
     )
     process.exit(0)
   }
@@ -469,7 +529,8 @@ async function main(): Promise<void> {
   console.log(
     `[ci-review] Reviewing ${diffInfo.fileCount} files (${changedFiles.length} with full context, ${Math.round(fileContext.length / 1000)}KB)...`
   )
-  const result = await callCerebras(apiKey, diffInfo.cleanDiff, fileContext)
+  const prBody = getPrBody(prNumber)
+  const result = await callCerebras(apiKey, diffInfo.cleanDiff, fileContext, prBody)
 
   if (result.apiError) {
     console.warn('[ci-review] Cerebras API failed. Posting skip notice.')
@@ -477,7 +538,7 @@ async function main(): Promise<void> {
       prNumber,
       repo,
       'COMMENT',
-      '## Automated Code Review\n\nAutomated review skipped -- API unavailable.'
+      `## Automated Code Review\n\nAutomated review skipped -- API unavailable.\n\nAn rc-int member can comment \`${APPROVAL_COMMENT}\` to manually approve this PR.`
     )
     process.exit(0) // Don't fail the workflow on API issues
   }
@@ -526,12 +587,17 @@ async function main(): Promise<void> {
 
 export {
   buildReviewPrompt,
+  buildUserMessage,
   callCerebras,
+  getManualApprovalFromEnv,
+  isApprovedComment,
+  isTrustedApprovalAssociation,
   parseDiff,
   formatReviewBody,
   reviewEvent,
   postPrReview,
   getPrCommitMessages,
+  getPrBody,
   CI_TIMEOUT_MS,
   type CerebrasResult,
   type DiffInfo,
