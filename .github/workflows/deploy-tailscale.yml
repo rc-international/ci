@@ -1,0 +1,190 @@
+# Reusable Tailscale deploy workflow — rc-international standard.
+#
+# Standardizes deployment across the org onto Tailscale, replacing per-repo
+# divergence (public-IP appleboy/ssh-action vs darena's tailscale + ssh-agent).
+#
+# It:
+#   (a) joins the tailnet (tailscale/github-action@v2, tag:ci) using the org
+#       OAuth secrets TS_OAUTH_CLIENT_ID / TS_OAUTH_CLIENT_SECRET;
+#   (b) loads a deploy SSH key into webfactory/ssh-agent@v0.9.0;
+#   (c) fans out over a caller-supplied HOST MATRIX (JSON array; each entry:
+#       name, ssh_host, ssh_user, ssh_port, via_tailscale, key_secret),
+#       seeding known_hosts via ssh-keyscan with accept-new; and
+#   (d) runs a caller-provided remote deploy script over ssh on each host
+#       (as a sudo/root-capable user), failing the job if ANY host fails.
+#
+# ---------------------------------------------------------------------------
+# HOW SECRETS FLOW
+#
+# GitHub Actions cannot dynamically index secrets[<matrix value>] inside a
+# reusable workflow, so the actual private-key material is passed through the
+# FIXED, NAMED secrets below (deploy_ssh_key_1..4). Each host-matrix entry names
+# which of those slots holds its key via `key_secret` (KEY_1..KEY_4). Hosts that
+# share one key point at the same slot. TS OAuth is passed the same way.
+#
+# Callers should use `secrets: inherit` (the org convention) OR map the named
+# secrets explicitly. Unused deploy_ssh_key_N slots may be omitted.
+# ---------------------------------------------------------------------------
+
+name: Reusable Tailscale Deploy
+
+on:
+  workflow_call:
+    inputs:
+      hosts:
+        description: >-
+          JSON array of host objects. Each entry:
+            {"name":"<label>","ssh_host":"<ip-or-dns>","ssh_user":"<user>",
+             "ssh_port":"<port>","via_tailscale":true|false,
+             "key_secret":"KEY_1"|"KEY_2"|"KEY_3"|"KEY_4"}
+          `via_tailscale` may be per-host; the tailnet is joined only if ANY
+          host needs it (see `any_tailscale`). `key_secret` selects which
+          deploy_ssh_key_N secret to load for that host.
+        required: true
+        type: string
+      remote_script:
+        description: >-
+          The deploy script to execute ON each remote host over ssh. Runs under
+          `bash -s` on the host as the matrix entry's ssh_user (sudo/root
+          capable). It receives FORCE and HOST_NAME in its environment.
+        required: true
+        type: string
+      any_tailscale:
+        description: >-
+          Whether to join the tailnet before deploying. Set true if ANY host in
+          the matrix has via_tailscale: true. Defaults to true (safe: joining
+          the tailnet is harmless for public-IP hosts).
+        required: false
+        type: boolean
+        default: true
+      tailscale_tags:
+        description: "Tailscale ACL tag the CI OAuth client authenticates as."
+        required: false
+        type: string
+        default: "tag:ci"
+      force:
+        description: "Redeploy even if the host is already on origin/main."
+        required: false
+        type: boolean
+        default: false
+      max_parallel:
+        description: >-
+          Max hosts to deploy concurrently. Default 1 = serialized rollout
+          (safer: a bad build stops at the first host).
+        required: false
+        type: number
+        default: 1
+      runs_on:
+        description: "Runner label for the deploy job."
+        required: false
+        type: string
+        default: "ubuntu-latest"
+    secrets:
+      # Tailscale OAuth (tag:ci scope). Org-level; required only when
+      # any_tailscale is true, but declared required:false so public-IP-only
+      # callers need not define them.
+      TS_OAUTH_CLIENT_ID:
+        required: false
+      TS_OAUTH_CLIENT_SECRET:
+        required: false
+      # Up to four distinct deploy SSH private keys (PEM). Each host's
+      # `key_secret` selects one of these slots.
+      deploy_ssh_key_1:
+        required: false
+      deploy_ssh_key_2:
+        required: false
+      deploy_ssh_key_3:
+        required: false
+      deploy_ssh_key_4:
+        required: false
+
+concurrency:
+  group: deploy-tailscale-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ${{ inputs.runs_on }}
+    strategy:
+      # Report every host; do not cancel siblings when one fails. The final
+      # per-host non-zero exit still fails the overall job.
+      fail-fast: false
+      max-parallel: ${{ inputs.max_parallel }}
+      matrix:
+        host: ${{ fromJSON(inputs.hosts) }}
+    env:
+      # Resolve the selected key slot to the actual key material once, here, so
+      # the rest of the job only touches DEPLOY_SSH_KEY. Exactly one branch is
+      # non-empty per host.
+      DEPLOY_SSH_KEY: >-
+        ${{ matrix.host.key_secret == 'KEY_1' && secrets.deploy_ssh_key_1
+         || matrix.host.key_secret == 'KEY_2' && secrets.deploy_ssh_key_2
+         || matrix.host.key_secret == 'KEY_3' && secrets.deploy_ssh_key_3
+         || matrix.host.key_secret == 'KEY_4' && secrets.deploy_ssh_key_4
+         || '' }}
+      SSH_HOST: ${{ matrix.host.ssh_host }}
+      SSH_USER: ${{ matrix.host.ssh_user }}
+      SSH_PORT: ${{ matrix.host.ssh_port }}
+      HOST_NAME: ${{ matrix.host.name }}
+      FORCE: ${{ inputs.force }}
+    steps:
+      - name: Validate host entry + selected key
+        run: |
+          set -euo pipefail
+          : "${SSH_HOST:?host matrix entry missing ssh_host}"
+          : "${SSH_USER:?host matrix entry missing ssh_user}"
+          if [ -z "${DEPLOY_SSH_KEY}" ]; then
+            echo "::error::No SSH key resolved for host '${HOST_NAME}'." \
+                 "Its key_secret ('${{ matrix.host.key_secret }}') did not map" \
+                 "to a defined deploy_ssh_key_N secret. Check the caller's" \
+                 "secrets mapping."
+            exit 1
+          fi
+          echo "Host '${HOST_NAME}' -> ${SSH_USER}@${SSH_HOST}:${SSH_PORT:-22}" \
+               "(via_tailscale=${{ matrix.host.via_tailscale }})"
+
+      - name: Join tailnet
+        if: ${{ inputs.any_tailscale && matrix.host.via_tailscale }}
+        uses: tailscale/github-action@v2
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
+          tags: ${{ inputs.tailscale_tags }}
+
+      - name: Set up SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ env.DEPLOY_SSH_KEY }}
+
+      - name: Seed known_hosts (ssh-keyscan, accept-new)
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          # Pre-seed the host key so StrictHostKeyChecking has a trust anchor.
+          # accept-new on the ssh call still handles a first-connect miss.
+          ssh-keyscan -p "${SSH_PORT:-22}" -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null \
+            || echo "warning: ssh-keyscan failed for ${SSH_HOST}:${SSH_PORT:-22} (accept-new will handle it)"
+          chmod 600 ~/.ssh/known_hosts || true
+
+      - name: Deploy to ${{ matrix.host.name }}
+        env:
+          # The caller's remote script, verbatim. Passed via env so it is not
+          # re-expanded on the runner.
+          REMOTE_SCRIPT: ${{ inputs.remote_script }}
+        run: |
+          set -euo pipefail
+          # Materialize the caller script to a temp file (prefixed with the
+          # error-fail shell opts) and feed it to remote `bash -s` over stdin.
+          # This avoids a here-doc whose expansions would run on the RUNNER
+          # (shellcheck SC2087): `printf '%s'` prints the script literally, so
+          # every $VAR / $(...) in it is evaluated on the HOST. FORCE + HOST_NAME
+          # are injected into the remote environment via the ssh command prefix.
+          script_file="$(mktemp)"
+          trap 'rm -f "$script_file"' EXIT
+          {
+            printf '%s\n' 'set -euo pipefail'
+            printf '%s\n' "$REMOTE_SCRIPT"
+          } > "$script_file"
+          ssh -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new \
+            -p "${SSH_PORT:-22}" "${SSH_USER}@${SSH_HOST}" \
+            "FORCE='${FORCE:-false}' HOST_NAME='${HOST_NAME}' bash -s" < "$script_file"
