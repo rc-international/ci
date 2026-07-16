@@ -1,0 +1,26 @@
+# Self code-review — runs ci's OWN reusable code-review on ci's OWN PRs.
+#
+# ci hosts the reusable code-review.yml (on: workflow_call) that every consumer
+# repo calls, but had no caller for itself — so ci's own PRs never got the
+# valors-release-bot APPROVE that satisfies branch protection (they sat at
+# REVIEW_REQUIRED). This is the missing self-caller.
+#
+# It references the LOCAL reusable workflows (`./…`) rather than @main so that a
+# change to the reviewer is exercised on the same PR that changes it.
+name: Self Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  review:
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/code-review.yml
+    secrets: inherit
+  dependabot-approve:
+    if: github.event_name == 'pull_request_target' && github.event.pull_request.user.login == 'dependabot[bot]'
+    uses: ./.github/workflows/dependabot-approve.yml
+    secrets: inherit
