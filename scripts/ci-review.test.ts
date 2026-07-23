@@ -109,9 +109,10 @@ describe("over-limit prompt handling", () => {
 			"sys",
 		);
 		expect(huge.diff.trim()).toBe(""); // triggers the diff-too-large branch in main()
+		expect(huge.totalEstimatedTokens).toBeGreaterThan(mod.INPUT_TOKEN_BUDGET);
 
 		const body = mod.formatTooLargeBody(
-			{ current: huge.estimatedInputTokens, limit: mod.INPUT_TOKEN_BUDGET },
+			{ current: huge.totalEstimatedTokens, limit: mod.INPUT_TOKEN_BUDGET },
 			1,
 		);
 		expect(body).toContain("diff too large");

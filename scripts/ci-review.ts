@@ -17,7 +17,7 @@
  *   CEREBRAS_MODEL                 — model override (default: zai-glm-4.7)
  */
 
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import {
 	computeImpactScore,
@@ -103,6 +103,7 @@ interface BudgetedPayload {
 	fileContext: string;
 	omittedFiles: string[]; // files dropped from the diff to fit the token budget
 	estimatedInputTokens: number;
+	totalEstimatedTokens: number; // honest total cost of reviewing ALL candidate files
 }
 
 interface ManualApproval {
@@ -185,7 +186,7 @@ function buildFileContextSection(filePath: string): string {
 	if (DOC_EXTENSIONS.has(`.${filePath.split(".").pop()?.toLowerCase()}`))
 		return "";
 	try {
-		const content = execSync(`git show HEAD:${filePath}`, {
+		const content = execFileSync("git", ["show", `HEAD:${filePath}`], {
 			encoding: "utf-8",
 			timeout: 5_000,
 			maxBuffer: 1024 * 1024,
@@ -251,11 +252,18 @@ function budgetPayload(
 		}
 	}
 
+	// Honest total: fixed overhead plus EVERY candidate file's diff, so the
+	// "too large" notice can report a `current` that truthfully exceeds the limit.
+	const totalEstimatedTokens =
+		fixedTokens +
+		sections.reduce((sum, { diff }) => sum + estimateTokens(diff), 0);
+
 	return {
 		diff: includedDiffs.join(""),
 		fileContext: contextSections.join("\n\n"),
 		omittedFiles,
 		estimatedInputTokens: INPUT_TOKEN_BUDGET - remaining,
+		totalEstimatedTokens,
 	};
 }
 
@@ -382,7 +390,7 @@ async function callCerebras(
 						},
 					],
 					temperature: 0.1,
-					max_completion_tokens: 8192,
+					max_completion_tokens: MAX_COMPLETION_TOKENS,
 				}),
 				signal: controller.signal,
 			});
@@ -485,7 +493,7 @@ function formatTooLargeBody(
 	return [
 		"## Automated Code Review",
 		"",
-		`Automated review skipped -- diff too large (${tokenInfo.current} tokens > ${tokenInfo.limit} limit) across ${fileCount} files.`,
+		`Automated review skipped -- diff too large (${tokenInfo.current} tokens > ${tokenInfo.limit} limit) across ${fileCount} file${fileCount === 1 ? "" : "s"}.`,
 		"",
 		"The change exceeds the model context window even after trimming. Consider splitting this PR into smaller, focused changes so it can be reviewed.",
 		"",
@@ -594,8 +602,17 @@ function formatReviewBody(
 
 function getPrCommitMessages(prNumber: string): string[] {
 	try {
-		const json = execSync(
-			`gh pr view ${prNumber} --json commits --jq '.commits[].messageHeadline'`,
+		const json = execFileSync(
+			"gh",
+			[
+				"pr",
+				"view",
+				String(prNumber),
+				"--json",
+				"commits",
+				"--jq",
+				".commits[].messageHeadline",
+			],
 			{ encoding: "utf-8", timeout: 10_000 },
 		);
 		return json.trim().split("\n").filter(Boolean);
@@ -610,11 +627,15 @@ function getPrCommitMessages(prNumber: string): string[] {
 
 function getPrBody(prNumber: string): string {
 	try {
-		return execSync(`gh pr view ${prNumber} --json body --jq '.body'`, {
-			encoding: "utf-8",
-			timeout: 5_000,
-			maxBuffer: 200_000,
-		}).trim();
+		return execFileSync(
+			"gh",
+			["pr", "view", String(prNumber), "--json", "body", "--jq", ".body"],
+			{
+				encoding: "utf-8",
+				timeout: 5_000,
+				maxBuffer: 200_000,
+			},
+		).trim();
 	} catch (err) {
 		console.warn(
 			`[ci-review] PR body fetch failed for #${prNumber}: ${err instanceof Error ? err.message : err}`,
@@ -634,8 +655,16 @@ async function postPrReview(
 	try {
 		const ghEvent = event === "APPROVE" ? "APPROVE" : event;
 		const payload = JSON.stringify({ event: ghEvent, body });
-		execSync(
-			`gh api repos/${repo}/pulls/${prNumber}/reviews --method POST --input -`,
+		execFileSync(
+			"gh",
+			[
+				"api",
+				`repos/${repo}/pulls/${prNumber}/reviews`,
+				"--method",
+				"POST",
+				"--input",
+				"-",
+			],
 			{
 				encoding: "utf-8",
 				timeout: 15_000,
@@ -698,7 +727,7 @@ async function main(): Promise<void> {
 	} else {
 		// Read from stdin (piped from gh pr diff)
 		try {
-			rawDiff = execSync(`gh pr diff ${prNumber}`, {
+			rawDiff = execFileSync("gh", ["pr", "diff", String(prNumber)], {
 				encoding: "utf-8",
 				maxBuffer: 5 * 1024 * 1024,
 				timeout: 30_000,
@@ -756,14 +785,14 @@ async function main(): Promise<void> {
 	if (budget.diff.trim().length === 0) {
 		// Even a single file's diff exceeds the budget — nothing can be reviewed.
 		console.warn(
-			`[ci-review] Diff too large to review (est. ${budget.estimatedInputTokens} tokens > ${INPUT_TOKEN_BUDGET} budget). Posting notice.`,
+			`[ci-review] Diff too large to review (est. ${budget.totalEstimatedTokens} tokens > ${INPUT_TOKEN_BUDGET} budget). Posting notice.`,
 		);
 		await postPrReview(
 			prNumber,
 			repo,
 			"COMMENT",
 			formatTooLargeBody(
-				{ current: budget.estimatedInputTokens, limit: INPUT_TOKEN_BUDGET },
+				{ current: budget.totalEstimatedTokens, limit: INPUT_TOKEN_BUDGET },
 				diffInfo.fileCount,
 			),
 		);
