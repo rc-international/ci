@@ -12,6 +12,43 @@ name: Code Review
 
 on:
   workflow_call:
+    # Optional comment-context inputs. Callers that trigger this reusable on an
+    # `issue_comment` event pass these so the manual `approved`-comment fallback
+    # (used when the Cerebras automated review is unavailable) can run. Callers
+    # that don't pass them keep the existing `pull_request` behavior exactly:
+    # the defaults below leave GITHUB_EVENT_NAME empty, so ci-review.ts's
+    # `getManualApprovalFromEnv()` returns null and the normal diff review runs.
+    inputs:
+      github_event_name:
+        description: 'github.event_name of the caller (e.g. pull_request, issue_comment)'
+        required: false
+        type: string
+        default: ''
+      comment_body:
+        description: 'Body of the triggering comment (issue_comment only)'
+        required: false
+        type: string
+        default: ''
+      comment_author:
+        description: 'Login of the comment author (issue_comment only)'
+        required: false
+        type: string
+        default: ''
+      comment_author_association:
+        description: 'Author association of the comment author (OWNER/MEMBER/...)'
+        required: false
+        type: string
+        default: ''
+      comment_is_pr:
+        description: 'Whether the issue_comment is on a PR ("true"/"false")'
+        required: false
+        type: string
+        default: 'false'
+      pr_number:
+        description: 'PR number to review/approve (defaults to pull_request number)'
+        required: false
+        type: string
+        default: ''
     secrets:
       CEREBRAS_API_KEY:
         required: true
@@ -79,6 +116,15 @@ jobs:
         env:
           CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ inputs.pr_number != '' && inputs.pr_number || github.event.pull_request.number }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+          # Comment-context passthrough for the manual `approved`-comment fallback.
+          # When the caller triggers on `pull_request`, these are empty/defaulted,
+          # so ci-review.ts runs its normal diff review. When the caller triggers
+          # on `issue_comment`, these route to getManualApprovalFromEnv().
+          GITHUB_EVENT_NAME: ${{ inputs.github_event_name }}
+          COMMENT_BODY: ${{ inputs.comment_body }}
+          COMMENT_AUTHOR: ${{ inputs.comment_author }}
+          COMMENT_AUTHOR_ASSOCIATION: ${{ inputs.comment_author_association }}
+          COMMENT_IS_PR: ${{ inputs.comment_is_pr }}
         run: bun .ci/scripts/ci-review.ts
