@@ -135,6 +135,92 @@ describe("over-limit prompt handling", () => {
 	});
 });
 
+describe("parseFindings", () => {
+	it("treats an empty array as a clean, well-formed 0-findings review", () => {
+		const res = mod.parseFindings("[]");
+		expect(res.ok).toBe(true);
+		if (res.ok) expect(res.findings).toHaveLength(0);
+	});
+
+	it("parses a well-formed findings array", () => {
+		const res = mod.parseFindings(
+			'prose... [{"file":"a.ts","severity":"high","category":"bug","description":"x","suggested_fix":"y","line_range":"1-2"}] trailing',
+		);
+		expect(res.ok).toBe(true);
+		if (res.ok) expect(res.findings).toHaveLength(1);
+	});
+
+	it("reports a FAILURE (not empty findings) when the reply is truncated with no closing bracket", () => {
+		// The real incident: the model's reply was cut off mid-array. Old behaviour
+		// coerced this to `[]` (0 findings, green approve). It must now be a failure.
+		const res = mod.parseFindings('[{"file":"a.ts","severity":"hig');
+		expect(res.ok).toBe(false);
+	});
+
+	it("reports a FAILURE when a bracketed span is present but not valid JSON", () => {
+		const res = mod.parseFindings('[{"file": "a.ts", severity: high}]');
+		expect(res.ok).toBe(false);
+	});
+});
+
+describe("callCerebras parse handling", () => {
+	it("returns parse_error (NOT a clean 0-findings review) on a truncated completion", async () => {
+		// 2xx response whose message content is a truncated JSON array. Old code
+		// returned { findings: [], apiError: false } — indistinguishable from a real
+		// "no issues" review. It must now surface errorKind: "parse_error".
+		globalThis.fetch = (async () =>
+			new Response(
+				JSON.stringify({
+					choices: [
+						{
+							message: { content: '[{"file":"a.ts","severity":"hig' },
+							finish_reason: "length",
+						},
+					],
+				}),
+				{ status: 200 },
+			)) as typeof globalThis.fetch;
+
+		const res = await mod.callCerebras("test-key", "some diff", "", "");
+		expect(res.findings).toHaveLength(0);
+		expect(res.apiError).toBe(false);
+		expect(res.errorKind).toBe("parse_error");
+	});
+
+	it("returns a clean review (no errorKind) when the model legitimately reports no issues", async () => {
+		globalThis.fetch = (async () =>
+			new Response(
+				JSON.stringify({
+					choices: [
+						{ message: { content: "[]" }, finish_reason: "stop" },
+					],
+				}),
+				{ status: 200 },
+			)) as typeof globalThis.fetch;
+
+		const res = await mod.callCerebras("test-key", "some diff", "", "");
+		expect(res.findings).toHaveLength(0);
+		expect(res.apiError).toBe(false);
+		expect(res.errorKind).toBeUndefined();
+	});
+});
+
+describe("postPrReview failure signalling", () => {
+	it("returns false when the gh review POST fails (main() maps this to exit 1)", async () => {
+		// Force `gh` to be unresolvable so execFileSync throws — a deterministic,
+		// offline stand-in for a failed review POST. postPrReview must report false
+		// so main() exits non-zero instead of a green check with no review.
+		const origPath = process.env.PATH;
+		process.env.PATH = "";
+		try {
+			const ok = await mod.postPrReview("87", "owner/repo", "COMMENT", "body");
+			expect(ok).toBe(false);
+		} finally {
+			process.env.PATH = origPath;
+		}
+	});
+});
+
 describe("buildUserMessage ordering", () => {
 	it("orders PR body before file context before the diff", () => {
 		const msg = mod.buildUserMessage("DIFFTEXT", "CTXTEXT", "PRBODYTEXT");
