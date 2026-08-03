@@ -75,7 +75,14 @@ const DOC_EXTENSIONS = new Set([
 // 'unavailable' — genuine reachability failure (5xx, network, timeout, missing/invalid key)
 // 'too_large'   — payload exceeded the model context window (400 context_length_exceeded)
 // 'client_error'— other 4xx: the request was rejected, but the API is reachable
-type CerebrasErrorKind = "unavailable" | "too_large" | "client_error";
+// 'parse_error' — the API was reachable and returned 2xx, but the model's reply was
+//                 truncated/malformed and no findings array could be parsed. This is
+//                 NOT a clean "0 findings" review — the caller must fail loud.
+type CerebrasErrorKind =
+	| "unavailable"
+	| "too_large"
+	| "client_error"
+	| "parse_error";
 
 interface CerebrasResult {
 	findings: ReviewFinding[];
@@ -356,6 +363,33 @@ function classifyHttpError(
 	return { kind: "unavailable" };
 }
 
+/**
+ * Parse the model's reply into findings. A well-behaved reply is a JSON array
+ * (`[]` for no issues, or `[{...}]`). A truncated/malformed reply — the Cerebras
+ * response that motivated this code — has no complete `[...]` or fails JSON.parse.
+ * We report that as a parse FAILURE, never as an empty "0 findings" review, so a
+ * broken API response is distinguishable from a genuinely clean one.
+ */
+function parseFindings(
+	content: string,
+):
+	| { ok: true; findings: ReviewFinding[] }
+	| { ok: false; error: string } {
+	const jsonMatch = content.match(/\[[\s\S]*\]/);
+	if (!jsonMatch) return { ok: false, error: "no JSON array found in response" };
+	try {
+		const parsed = JSON.parse(jsonMatch[0]);
+		if (!Array.isArray(parsed))
+			return { ok: false, error: "parsed value is not an array" };
+		return { ok: true, findings: parsed as ReviewFinding[] };
+	} catch (e) {
+		return {
+			ok: false,
+			error: e instanceof Error ? e.message : String(e),
+		};
+	}
+}
+
 async function callCerebras(
 	apiKey: string,
 	diff: string,
@@ -419,17 +453,34 @@ async function callCerebras(
 			}
 
 			const data = (await response.json()) as {
-				choices?: Array<{ message?: { content?: string } }>;
+				choices?: Array<{
+					message?: { content?: string };
+					finish_reason?: string;
+				}>;
 			};
-			const content = data.choices?.[0]?.message?.content?.trim() || "";
+			const choice = data.choices?.[0];
+			const content = choice?.message?.content?.trim() || "";
+			const finishReason = choice?.finish_reason;
 
-			// Extract JSON array from response
-			const jsonMatch = content.match(/\[[\s\S]*\]/);
-			if (!jsonMatch) return { findings: [], apiError: false };
+			// A completion truncated by the token limit (finish_reason "length") or
+			// a reply with no parseable findings array is a MALFORMED response, not a
+			// clean "0 findings" review. The failure is transient (a rerun succeeded),
+			// so retry; if it persists, surface parse_error so the caller fails loud
+			// instead of posting a bogus empty approval.
+			const parsed = parseFindings(content);
+			if (!parsed.ok || finishReason === "length") {
+				const reason = parsed.ok
+					? "completion truncated (finish_reason=length)"
+					: parsed.error;
+				console.error(
+					`[ci-review] Cerebras reply was incomplete/unparseable (finish_reason=${finishReason ?? "?"}, ${content.length} chars): ${reason}`,
+				);
+				if (attempt < MAX_RETRIES) continue;
+				return { findings: [], apiError: false, errorKind: "parse_error" };
+			}
 
-			const findings: ReviewFinding[] = JSON.parse(jsonMatch[0]);
 			return {
-				findings: findings.filter(
+				findings: parsed.findings.filter(
 					(f) =>
 						f.file &&
 						f.severity &&
@@ -676,8 +727,9 @@ async function postPrReview(
 		);
 		return true;
 	} catch (err: any) {
+		const stderr = err?.stderr ? `\n${String(err.stderr).trim()}` : "";
 		console.error(
-			`[ci-review] Failed to post PR review: ${err?.message || err}`,
+			`[ci-review] Failed to post PR review (${event}) to ${repo}#${prNumber}: ${err?.message || err}${stderr}`,
 		);
 		return false;
 	}
@@ -856,6 +908,17 @@ async function main(): Promise<void> {
 		process.exit(0); // Don't fail the workflow on API issues
 	}
 
+	if (result.errorKind === "parse_error") {
+		// The API was reachable but returned a truncated/unparseable review after
+		// retries. Unlike the notice paths above, this is a genuine FAILURE: coercing
+		// it to an empty "0 findings" approval is exactly the silent bug we're fixing.
+		// Fail loud (non-zero) so the check goes red and a rerun is triggered.
+		console.error(
+			`[ci-review] Unrecoverable: Cerebras returned an unparseable review for ${repo}#${prNumber} after ${MAX_RETRIES + 1} attempt(s). Failing the check instead of posting an empty review.`,
+		);
+		process.exit(1);
+	}
+
 	const { findings } = result;
 
 	// Compute impact score (non-blocking: failures don't affect review)
@@ -882,7 +945,7 @@ async function main(): Promise<void> {
 		impactScore,
 	});
 
-	await postPrReview(prNumber, repo, event, body);
+	const posted = await postPrReview(prNumber, repo, event, body);
 
 	// Log summary
 	const logCounts: Record<string, number> = {
@@ -899,8 +962,10 @@ async function main(): Promise<void> {
 		`[ci-review] Review complete: ${findings.length} findings (critical=${logCounts.critical}, high=${logCounts.high}, medium=${logCounts.medium}, low=${logCounts.low}, needs-verification=${logCounts["needs-verification"]})`,
 	);
 
-	// Don't fail the workflow — the PR review itself communicates the findings
-	process.exit(0);
+	// A review was computed but posting it FAILED — the PR would otherwise show a
+	// green check with no review attached (the silent-failure bug). Fail loud so the
+	// missing review is visible instead of masked by exit 0.
+	process.exit(posted ? 0 : 1);
 }
 
 // ── Exports for testing ─────────────────────────────────────────────────────
@@ -935,6 +1000,7 @@ export {
 	isTrustedApprovalAssociation,
 	MODEL_CONTEXT_TOKENS,
 	parseDiff,
+	parseFindings,
 	postPrReview,
 	reviewEvent,
 };
