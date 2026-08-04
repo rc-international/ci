@@ -205,6 +205,25 @@ describe("callCerebras parse handling", () => {
 	});
 });
 
+describe("parse_error soft-fail notice", () => {
+	it("posts a non-blocking skip notice — NOT a red check — on a truncated reply", () => {
+		// Regression guard: main() used to process.exit(1) on errorKind ===
+		// "parse_error", turning the check red and blocking every merge whenever the
+		// model truncated. It now posts formatParseErrorBody as a COMMENT and exits 0.
+		const body = mod.formatParseErrorBody(2); // MAX_RETRIES (1) + 1 attempt
+		expect(body).toContain("truncated/unparseable");
+		expect(body).toContain("Merging is not blocked on this");
+		// Must NOT masquerade as the other, distinct skip notices.
+		expect(body).not.toContain("API unavailable");
+		expect(body).not.toContain("diff too large");
+	});
+
+	it("pluralises the attempt count from MAX_RETRIES + 1", () => {
+		expect(mod.formatParseErrorBody(1)).toContain("after 1 attempt.");
+		expect(mod.formatParseErrorBody(2)).toContain("after 2 attempts.");
+	});
+});
+
 describe("postPrReview failure signalling", () => {
 	it("returns false when the gh review POST fails (main() maps this to exit 1)", async () => {
 		// Force `gh` to be unresolvable so execFileSync throws — a deterministic,

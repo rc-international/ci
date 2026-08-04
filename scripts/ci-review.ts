@@ -552,6 +552,22 @@ function formatTooLargeBody(
 	].join("\n");
 }
 
+/**
+ * Message posted when the model returned a truncated/unparseable reply after
+ * every retry. Distinct from the "API unavailable" notice — the API was
+ * reachable, the reply just could not be parsed. Non-blocking: a maintainer can
+ * re-run the check.
+ */
+function formatParseErrorBody(attempts: number): string {
+	return [
+		"## Automated Code Review",
+		"",
+		`Automated review skipped -- the model returned a truncated/unparseable response after ${attempts} attempt${attempts === 1 ? "" : "s"}. Merging is not blocked on this; a maintainer can re-run the check.`,
+		"",
+		`An rc-int member can comment \`${APPROVAL_COMMENT}\` to manually approve this PR.`,
+	].join("\n");
+}
+
 function formatReviewBody(
 	findings: ReviewFinding[],
 	opts: FormatOptions,
@@ -910,13 +926,21 @@ async function main(): Promise<void> {
 
 	if (result.errorKind === "parse_error") {
 		// The API was reachable but returned a truncated/unparseable review after
-		// retries. Unlike the notice paths above, this is a genuine FAILURE: coercing
-		// it to an empty "0 findings" approval is exactly the silent bug we're fixing.
-		// Fail loud (non-zero) so the check goes red and a rerun is triggered.
+		// retries. Coercing it to an empty "0 findings" approval is the silent bug
+		// we guard against — but hard-failing the check blocks every merge whenever
+		// the model truncates. Keep the diagnostic loud in the logs, then post a
+		// non-blocking skip notice (mirrors the apiError/client_error paths) so a
+		// maintainer can re-run the check without the PR going red.
 		console.error(
-			`[ci-review] Unrecoverable: Cerebras returned an unparseable review for ${repo}#${prNumber} after ${MAX_RETRIES + 1} attempt(s). Failing the check instead of posting an empty review.`,
+			`[ci-review] Unrecoverable: Cerebras returned an unparseable review for ${repo}#${prNumber} after ${MAX_RETRIES + 1} attempt(s). Posting a skip notice instead of an empty review.`,
 		);
-		process.exit(1);
+		await postPrReview(
+			prNumber,
+			repo,
+			"COMMENT",
+			formatParseErrorBody(MAX_RETRIES + 1),
+		);
+		process.exit(0); // Don't fail the workflow on a truncated model reply
 	}
 
 	const { findings } = result;
@@ -990,6 +1014,7 @@ export {
 	type DiffInfo,
 	estimateTokens,
 	type FormatOptions,
+	formatParseErrorBody,
 	formatReviewBody,
 	formatTooLargeBody,
 	getManualApprovalFromEnv,
