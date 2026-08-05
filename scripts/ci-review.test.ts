@@ -269,6 +269,29 @@ describe("readIntEnv", () => {
 	});
 });
 
+describe("CI_TIMEOUT_MS", () => {
+	const KEY = "CI_REVIEW_TIMEOUT_MS";
+	afterEach(() => {
+		delete process.env[KEY];
+	});
+
+	it("defaults to 180000 ms (3 min) when CI_REVIEW_TIMEOUT_MS is unset", () => {
+		// The env var is unset at import time, so the exported constant holds the
+		// raised default — confirming the 60s → 180s bump.
+		expect(mod.CI_TIMEOUT_MS).toBe(180_000);
+	});
+	it("is env-overridable via CI_REVIEW_TIMEOUT_MS through readIntEnv", () => {
+		// The module derives CI_TIMEOUT_MS from readIntEnv(KEY, 180_000, 1_000);
+		// exercise that binding directly since the constant is read once at import.
+		process.env[KEY] = "300000";
+		expect(mod.readIntEnv(KEY, 180_000, 1_000)).toBe(300_000);
+	});
+	it("floors out sub-1000ms overrides back to the default", () => {
+		process.env[KEY] = "500";
+		expect(mod.readIntEnv(KEY, 180_000, 1_000)).toBe(180_000);
+	});
+});
+
 describe("nextCompletionBudget", () => {
 	it("never lets the ceiling drop below the base budget", () => {
 		// Clamp invariant: even a misconfigured lower ceiling env can't make an

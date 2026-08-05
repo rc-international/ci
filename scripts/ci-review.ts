@@ -30,7 +30,6 @@ import { buildReviewPrompt, type ReviewFinding } from "./lib/review-prompt.js";
 
 const CEREBRAS_ENDPOINT = "https://api.cerebras.ai/v1/chat/completions";
 const CEREBRAS_MODEL = process.env.CEREBRAS_MODEL || "zai-glm-4.7";
-const CI_TIMEOUT_MS = 60_000;
 const MAX_CONTEXT_CHARS = 400_000; // hard char cap on the raw diff (defense in depth)
 const MAX_DIFF_SIZE = MAX_CONTEXT_CHARS; // kept as alias for parseDiff compat
 const BUDGET_PER_FILE = 50_000; // cap individual file content in context
@@ -45,6 +44,10 @@ function readIntEnv(name: string, fallback: number, min: number): number {
 
 // Env-overridable so tests can disable the wait (CI_REVIEW_RETRY_DELAY_MS=0).
 const RETRY_DELAY_MS = readIntEnv("CI_REVIEW_RETRY_DELAY_MS", 2_000, 0);
+// Per-request timeout for the Cerebras call. Raised from the old hardcoded 60s to
+// 3 min (env-overridable) so zai-glm-4.7's reasoning-heavy replies aren't cut off
+// mid-response when the completion budget escalates toward 65536 tokens.
+const CI_TIMEOUT_MS = readIntEnv("CI_REVIEW_TIMEOUT_MS", 180_000, 1_000);
 // One retry (2 attempts total). A retry triggered by finish_reason=length ESCALATES
 // the completion budget (see nextCompletionBudget) instead of repeating the same
 // request — a length-truncated reply fails identically if retried unchanged.
