@@ -400,9 +400,9 @@ describe("callCerebras parse handling", () => {
 	});
 
 	it("sends a bounded reasoning_effort in the request body (default medium)", async () => {
-		// gpt-oss-120b supports graduated reasoning_effort. We keep deep reasoning but
-		// bound it so it fits the completion budget — the request body must carry the
-		// configured effort, defaulting to "medium".
+		// gemma-4-31b's reasoning is inherently bounded (a small fixed-depth block). We
+		// keep reasoning on but it fits the completion budget — the request body must
+		// carry the configured effort, defaulting to "medium".
 		let sentBody: Record<string, unknown> | undefined;
 		globalThis.fetch = (async (_url: unknown, init: { body: string }) => {
 			sentBody = JSON.parse(init.body);

@@ -29,7 +29,7 @@ import { buildReviewPrompt, type ReviewFinding } from "./lib/review-prompt.js";
 // ── Configuration ────────────────────────────────────────────────────────────
 
 const CEREBRAS_ENDPOINT = "https://api.cerebras.ai/v1/chat/completions";
-const CEREBRAS_MODEL = process.env.CEREBRAS_MODEL || "gpt-oss-120b";
+const CEREBRAS_MODEL = process.env.CEREBRAS_MODEL || "gemma-4-31b";
 const CI_TIMEOUT_MS = 60_000;
 const MAX_CONTEXT_CHARS = 400_000; // hard char cap on the raw diff (defense in depth)
 const MAX_DIFF_SIZE = MAX_CONTEXT_CHARS; // kept as alias for parseDiff compat
@@ -82,12 +82,15 @@ const MAX_COMPLETION_TOKENS_CEILING = Math.max(
 	MAX_COMPLETION_TOKENS,
 	readIntEnv("CI_REVIEW_MAX_COMPLETION_TOKENS_CEILING", 65_536, 1),
 );
-// gpt-oss-120b supports graduated reasoning_effort (low/medium/high), so we keep
-// deep reasoning — the bot is relied on over human review — but BOUND it to a level
-// that fits the completion budget. zai-glm-4.7 (its predecessor) could only toggle
-// reasoning on/off, so its thinking ran unbounded and could consume the entire
-// completion budget before any answer was emitted (finish_reason=length, 0 content
-// chars). Env-overridable to tune the depth without a code change.
+// gemma-4-31b's reasoning is effectively binary: a fixed ~530–700 token reasoning
+// block when enabled, vs "none" to disable — its low/medium/high levels are currently
+// undifferentiated. We keep reasoning ON (the bot is relied on over human review), and
+// because its reasoning is inherently bounded and small it fits comfortably within the
+// completion budget. This is unlike zai-glm-4.7, whose unbounded reasoning could consume
+// the entire completion budget before any answer was emitted (finish_reason=length, 0
+// content chars). Env-overridable via CI_REVIEW_REASONING_EFFORT; set to "none" to
+// disable reasoning entirely. The default "medium" (any non-none value) enables gemma's
+// fixed-depth reasoning.
 const CEREBRAS_REASONING_EFFORT =
 	process.env.CI_REVIEW_REASONING_EFFORT ?? "medium";
 // Conservative chars-per-token: real payloads have measured ~3.6 chars/token, so
