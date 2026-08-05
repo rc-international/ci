@@ -150,9 +150,10 @@ describe("parseFindings", () => {
 		if (res.ok) expect(res.findings).toHaveLength(1);
 	});
 
-	it("reports a FAILURE (not empty findings) when the reply is truncated with no closing bracket", () => {
-		// The real incident: the model's reply was cut off mid-array. Old behaviour
-		// coerced this to `[]` (0 findings, green approve). It must now be a failure.
+	it("reports a FAILURE (not empty findings) when the reply is truncated with no salvageable object", () => {
+		// The real incident: the model's reply was cut off mid-FIRST-object, so there
+		// is no complete `{...}` to salvage. Old behaviour coerced a `[...]`-less reply
+		// to `[]` (0 findings, green approve). It must remain a failure.
 		const res = mod.parseFindings('[{"file":"a.ts","severity":"hig');
 		expect(res.ok).toBe(false);
 	});
@@ -160,6 +161,84 @@ describe("parseFindings", () => {
 	it("reports a FAILURE when a bracketed span is present but not valid JSON", () => {
 		const res = mod.parseFindings('[{"file": "a.ts", severity: high}]');
 		expect(res.ok).toBe(false);
+	});
+
+	it("strips a ```json code fence around the array before parsing", () => {
+		const fenced =
+			'```json\n[{"file":"a.ts","severity":"low","category":"x","description":"d","suggested_fix":"f","line_range":"1"}]\n```';
+		const res = mod.parseFindings(fenced);
+		expect(res.ok).toBe(true);
+		if (res.ok) expect(res.findings).toHaveLength(1);
+	});
+
+	it("strips a bare ``` code fence around the array before parsing", () => {
+		const fenced = "```\n[]\n```";
+		const res = mod.parseFindings(fenced);
+		expect(res.ok).toBe(true);
+		if (res.ok) expect(res.findings).toHaveLength(0);
+	});
+
+	it("ignores trailing prose after the closing bracket", () => {
+		const res = mod.parseFindings(
+			'[{"file":"a.ts","severity":"high","category":"bug","description":"x","suggested_fix":"y","line_range":"1"}]\n\nThat concludes my review.',
+		);
+		expect(res.ok).toBe(true);
+		if (res.ok) expect(res.findings).toHaveLength(1);
+	});
+
+	it("salvages the complete leading objects from a truncated array missing its final ]", () => {
+		// Two complete finding objects, then a third cut off mid-value with no closing
+		// brace or `]`. Salvage must return the two complete ones and flag truncated.
+		const truncated =
+			'[{"file":"a.ts","severity":"high","category":"bug","description":"first","suggested_fix":"f1","line_range":"1"},' +
+			'{"file":"b.ts","severity":"medium","category":"perf","description":"second","suggested_fix":"f2","line_range":"2"},' +
+			'{"file":"c.ts","severity":"lo';
+		const res = mod.parseFindings(truncated);
+		expect(res.ok).toBe(true);
+		if (res.ok) {
+			expect(res.findings).toHaveLength(2);
+			expect(res.findings[0].file).toBe("a.ts");
+			expect(res.findings[1].file).toBe("b.ts");
+			expect(res.truncated).toBe(true);
+		}
+	});
+
+	it("does not split on braces inside string values when salvaging", () => {
+		// A description containing `{` / `}` must not confuse the brace scanner.
+		const truncated =
+			'[{"file":"a.ts","severity":"high","category":"bug","description":"uses object literal {x: 1}","suggested_fix":"f","line_range":"1"},' +
+			'{"file":"b.ts","severity":"lo';
+		const res = mod.parseFindings(truncated);
+		expect(res.ok).toBe(true);
+		if (res.ok) {
+			expect(res.findings).toHaveLength(1);
+			expect(res.findings[0].description).toContain("{x: 1}");
+		}
+	});
+});
+
+describe("stripCodeFences", () => {
+	it("returns non-fenced content unchanged (trimmed)", () => {
+		expect(mod.stripCodeFences("  [] ")).toBe("[]");
+	});
+	it("unwraps a ```json fence", () => {
+		expect(mod.stripCodeFences("```json\n[1]\n```")).toBe("[1]");
+	});
+	it("unwraps a bare ``` fence", () => {
+		expect(mod.stripCodeFences("```\n[2]\n```")).toBe("[2]");
+	});
+});
+
+describe("salvageObjects", () => {
+	it("returns [] when the leading object is truncated", () => {
+		expect(mod.salvageObjects('{"file":"a.ts","sev')).toHaveLength(0);
+	});
+	it("returns each complete object before a truncation point", () => {
+		const body =
+			'{"file":"a.ts","severity":"high","category":"c","description":"d","suggested_fix":"f","line_range":"1"},{"file":"b.ts","sev';
+		const objs = mod.salvageObjects(body);
+		expect(objs).toHaveLength(1);
+		expect(objs[0].file).toBe("a.ts");
 	});
 });
 
@@ -187,13 +266,35 @@ describe("callCerebras parse handling", () => {
 		expect(res.errorKind).toBe("parse_error");
 	});
 
-	it("returns a clean review (no errorKind) when the model legitimately reports no issues", async () => {
+	it("treats a length-truncated reply with a salvageable finding as a partial success (no parse_error)", async () => {
+		// finish_reason "length" but the reply contains one COMPLETE finding object
+		// before the cut. It must degrade to a partial review (the salvaged finding),
+		// not a parse_error skip that never approves.
+		const truncated =
+			'[{"file":"a.ts","severity":"high","category":"bug","description":"real issue","suggested_fix":"fix it","line_range":"1"},' +
+			'{"file":"b.ts","severity":"lo';
 		globalThis.fetch = (async () =>
 			new Response(
 				JSON.stringify({
 					choices: [
-						{ message: { content: "[]" }, finish_reason: "stop" },
+						{ message: { content: truncated }, finish_reason: "length" },
 					],
+				}),
+				{ status: 200 },
+			)) as typeof globalThis.fetch;
+
+		const res = await mod.callCerebras("test-key", "some diff", "", "");
+		expect(res.errorKind).toBeUndefined();
+		expect(res.apiError).toBe(false);
+		expect(res.findings).toHaveLength(1);
+		expect(res.findings[0].file).toBe("a.ts");
+	});
+
+	it("returns a clean review (no errorKind) when the model legitimately reports no issues", async () => {
+		globalThis.fetch = (async () =>
+			new Response(
+				JSON.stringify({
+					choices: [{ message: { content: "[]" }, finish_reason: "stop" }],
 				}),
 				{ status: 200 },
 			)) as typeof globalThis.fetch;

@@ -43,7 +43,15 @@ const MAX_RETRIES = 1;
 // this: a diff well under MAX_CONTEXT_CHARS plus unbounded full-file context can
 // still blow the token limit. So we estimate tokens and trim BEFORE sending.
 const MODEL_CONTEXT_TOKENS = 131_072; // zai-glm-4.7 hard context window (input + output)
-const MAX_COMPLETION_TOKENS = 8192; // reserved for the model's reply (mirrors the request below)
+// The model's reply is a JSON array of verbose finding objects and the prompt
+// enforces 16 mandatory HIGH engineering rules, so a finding-heavy diff routinely
+// blew the old 8192 cap → finish_reason "length" → truncated array → parse_error
+// skip that never approved. 24576 (24K) gives the reply ~3x the room while keeping
+// the input budget comfortably large: INPUT_TOKEN_BUDGET below works out to
+// floor(131072 * 0.9) - 24576 = 93388 tokens (>= 90K) for prompt + PR body +
+// context + diff. 32768 would drop the input budget to ~85K (below the 90K floor),
+// so 24576 is the sweet spot.
+const MAX_COMPLETION_TOKENS = 24576; // reserved for the model's reply (mirrors the request below)
 // Conservative chars-per-token: real payloads have measured ~3.6 chars/token, so
 // dividing by 3.5 slightly OVER-estimates token count — erring toward trimming.
 const CHARS_PER_TOKEN = 3.5;
@@ -364,30 +372,112 @@ function classifyHttpError(
 }
 
 /**
+ * Strip a single Markdown code fence (```json … ``` or ``` … ```) that wraps the
+ * whole reply. Models sometimes fence the JSON despite the "no markdown fencing"
+ * instruction, which broke the old greedy `[...]` match (the fence chars are not
+ * part of a valid array). No fence → returned unchanged.
+ */
+function stripCodeFences(content: string): string {
+	const trimmed = content.trim();
+	const fenced = trimmed.match(/^```(?:json)?\s*\n?([\s\S]*?)\n?```$/i);
+	return fenced ? fenced[1].trim() : trimmed;
+}
+
+/**
+ * Salvage the complete top-level `{...}` objects from a (possibly truncated) JSON
+ * array body. Scans char-by-char tracking brace depth and string/escape state so a
+ * reply cut off mid-array — missing its closing `]` and final object — still yields
+ * the findings it *did* fully emit, rather than a total parse failure. A leading
+ * object that is itself truncated contributes nothing (returns []).
+ */
+function salvageObjects(text: string): ReviewFinding[] {
+	const findings: ReviewFinding[] = [];
+	let depth = 0;
+	let start = -1;
+	let inString = false;
+	let escaped = false;
+
+	for (let i = 0; i < text.length; i++) {
+		const ch = text[i];
+		if (inString) {
+			if (escaped) escaped = false;
+			else if (ch === "\\") escaped = true;
+			else if (ch === '"') inString = false;
+			continue;
+		}
+		if (ch === '"') {
+			inString = true;
+		} else if (ch === "{") {
+			if (depth === 0) start = i;
+			depth++;
+		} else if (ch === "}") {
+			depth--;
+			if (depth === 0 && start !== -1) {
+				const slice = text.slice(start, i + 1);
+				try {
+					const obj = JSON.parse(slice);
+					if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+						findings.push(obj as ReviewFinding);
+					}
+				} catch (e) {
+					// A complete-braced span that still fails JSON.parse is malformed;
+					// skip it but keep salvaging later objects.
+					console.debug("[ci-review] salvage: skipping unparseable object:", e);
+				}
+				start = -1;
+			}
+		}
+	}
+
+	return findings;
+}
+
+/**
  * Parse the model's reply into findings. A well-behaved reply is a JSON array
- * (`[]` for no issues, or `[{...}]`). A truncated/malformed reply — the Cerebras
- * response that motivated this code — has no complete `[...]` or fails JSON.parse.
- * We report that as a parse FAILURE, never as an empty "0 findings" review, so a
- * broken API response is distinguishable from a genuinely clean one.
+ * (`[]` for no issues, or `[{...}]`). Robust to two real-world quirks: a reply
+ * wrapped in a Markdown code fence, and a reply TRUNCATED by the token limit
+ * (missing its closing `]`). We first strip fences and try a strict parse of the
+ * first `[...]` block; on failure we SALVAGE every complete `{...}` object in
+ * order so a truncated reply degrades to "the findings it produced" instead of a
+ * total skip. Only when nothing parseable can be recovered is this a FAILURE —
+ * distinguishing a broken response from a genuinely clean (`[]`) one. When the
+ * result was salvaged from a truncated reply, `truncated: true` is set so the
+ * caller can note the review is partial rather than treat it as a hard error.
  */
 function parseFindings(
 	content: string,
 ):
-	| { ok: true; findings: ReviewFinding[] }
+	| { ok: true; findings: ReviewFinding[]; truncated?: boolean }
 	| { ok: false; error: string } {
-	const jsonMatch = content.match(/\[[\s\S]*\]/);
-	if (!jsonMatch) return { ok: false, error: "no JSON array found in response" };
-	try {
-		const parsed = JSON.parse(jsonMatch[0]);
-		if (!Array.isArray(parsed))
-			return { ok: false, error: "parsed value is not an array" };
-		return { ok: true, findings: parsed as ReviewFinding[] };
-	} catch (e) {
-		return {
-			ok: false,
-			error: e instanceof Error ? e.message : String(e),
-		};
+	const cleaned = stripCodeFences(content);
+
+	// Fast path: a well-formed `[...]` block that parses as an array.
+	const jsonMatch = cleaned.match(/\[[\s\S]*\]/);
+	if (jsonMatch) {
+		try {
+			const parsed = JSON.parse(jsonMatch[0]);
+			if (Array.isArray(parsed))
+				return { ok: true, findings: parsed as ReviewFinding[] };
+		} catch (e) {
+			console.debug("[ci-review] strict array parse failed, salvaging:", e);
+		}
 	}
+
+	// Salvage path: parse each complete top-level object we can find. Anchor at the
+	// opening `[` when present so trailing prose before the array is ignored.
+	const openIdx = cleaned.indexOf("[");
+	const body = openIdx === -1 ? cleaned : cleaned.slice(openIdx + 1);
+	const salvaged = salvageObjects(body);
+	if (salvaged.length > 0) {
+		return { ok: true, findings: salvaged, truncated: true };
+	}
+
+	return {
+		ok: false,
+		error: jsonMatch
+			? "response array was not valid JSON and no findings could be salvaged"
+			: "no JSON array found in response",
+	};
 }
 
 async function callCerebras(
@@ -462,21 +552,34 @@ async function callCerebras(
 			const content = choice?.message?.content?.trim() || "";
 			const finishReason = choice?.finish_reason;
 
-			// A completion truncated by the token limit (finish_reason "length") or
-			// a reply with no parseable findings array is a MALFORMED response, not a
-			// clean "0 findings" review. The failure is transient (a rerun succeeded),
-			// so retry; if it persists, surface parse_error so the caller fails loud
-			// instead of posting a bogus empty approval.
+			// Parse the reply, salvaging complete objects from a fenced or truncated
+			// array. A reply with NOTHING parseable is a MALFORMED response, not a
+			// clean "0 findings" review: retry, then surface parse_error so the caller
+			// fails loud instead of posting a bogus empty approval.
+			//
+			// A completion truncated by the token limit (finish_reason "length") is
+			// only fatal when salvage recovered nothing. If we salvaged >= 1 finding,
+			// treat it as a successful — if partial — review rather than parse_error:
+			// "the findings it did produce" beats a total skip that never approves.
 			const parsed = parseFindings(content);
-			if (!parsed.ok || finishReason === "length") {
+			const truncatedNoSalvage =
+				finishReason === "length" &&
+				(!parsed.ok || parsed.findings.length === 0);
+			if (!parsed.ok || truncatedNoSalvage) {
 				const reason = parsed.ok
-					? "completion truncated (finish_reason=length)"
+					? "completion truncated (finish_reason=length), nothing salvageable"
 					: parsed.error;
 				console.error(
 					`[ci-review] Cerebras reply was incomplete/unparseable (finish_reason=${finishReason ?? "?"}, ${content.length} chars): ${reason}`,
 				);
 				if (attempt < MAX_RETRIES) continue;
 				return { findings: [], apiError: false, errorKind: "parse_error" };
+			}
+
+			if (finishReason === "length" || parsed.truncated) {
+				console.warn(
+					`[ci-review] Cerebras reply was truncated (finish_reason=${finishReason ?? "?"}); salvaged ${parsed.findings.length} complete finding(s) — review is PARTIAL.`,
+				);
 			}
 
 			return {
@@ -1028,6 +1131,8 @@ export {
 	parseFindings,
 	postPrReview,
 	reviewEvent,
+	salvageObjects,
+	stripCodeFences,
 };
 
 // Only run main when executed directly
