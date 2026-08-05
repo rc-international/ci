@@ -29,7 +29,7 @@ import { buildReviewPrompt, type ReviewFinding } from "./lib/review-prompt.js";
 // ── Configuration ────────────────────────────────────────────────────────────
 
 const CEREBRAS_ENDPOINT = "https://api.cerebras.ai/v1/chat/completions";
-const CEREBRAS_MODEL = process.env.CEREBRAS_MODEL || "zai-glm-4.7";
+const CEREBRAS_MODEL = process.env.CEREBRAS_MODEL || "gpt-oss-120b";
 const CI_TIMEOUT_MS = 60_000;
 const MAX_CONTEXT_CHARS = 400_000; // hard char cap on the raw diff (defense in depth)
 const MAX_DIFF_SIZE = MAX_CONTEXT_CHARS; // kept as alias for parseDiff compat
@@ -82,6 +82,14 @@ const MAX_COMPLETION_TOKENS_CEILING = Math.max(
 	MAX_COMPLETION_TOKENS,
 	readIntEnv("CI_REVIEW_MAX_COMPLETION_TOKENS_CEILING", 65_536, 1),
 );
+// gpt-oss-120b supports graduated reasoning_effort (low/medium/high), so we keep
+// deep reasoning — the bot is relied on over human review — but BOUND it to a level
+// that fits the completion budget. zai-glm-4.7 (its predecessor) could only toggle
+// reasoning on/off, so its thinking ran unbounded and could consume the entire
+// completion budget before any answer was emitted (finish_reason=length, 0 content
+// chars). Env-overridable to tune the depth without a code change.
+const CEREBRAS_REASONING_EFFORT =
+	process.env.CI_REVIEW_REASONING_EFFORT ?? "medium";
 // Conservative chars-per-token: real payloads have measured ~3.6 chars/token, so
 // dividing by 3.5 slightly OVER-estimates token count — erring toward trimming.
 const CHARS_PER_TOKEN = 3.5;
@@ -560,6 +568,7 @@ async function callCerebras(
 					],
 					temperature: 0.1,
 					max_completion_tokens: completionBudget,
+					reasoning_effort: CEREBRAS_REASONING_EFFORT,
 				}),
 				signal: controller.signal,
 			});
@@ -1167,6 +1176,7 @@ export {
 	type CerebrasResult,
 	CI_TIMEOUT_MS,
 	callCerebras,
+	CEREBRAS_REASONING_EFFORT,
 	classifyHttpError,
 	type DiffFileSection,
 	type DiffInfo,

@@ -399,6 +399,26 @@ describe("callCerebras parse handling", () => {
 		expect(budgets[1]).toBe(budgets[0]); // unchanged — no escalation
 	});
 
+	it("sends a bounded reasoning_effort in the request body (default medium)", async () => {
+		// gpt-oss-120b supports graduated reasoning_effort. We keep deep reasoning but
+		// bound it so it fits the completion budget — the request body must carry the
+		// configured effort, defaulting to "medium".
+		let sentBody: Record<string, unknown> | undefined;
+		globalThis.fetch = (async (_url: unknown, init: { body: string }) => {
+			sentBody = JSON.parse(init.body);
+			return new Response(
+				JSON.stringify({
+					choices: [{ message: { content: "[]" }, finish_reason: "stop" }],
+				}),
+				{ status: 200 },
+			);
+		}) as unknown as typeof globalThis.fetch;
+
+		await mod.callCerebras("test-key", "some diff", "", "");
+		expect(sentBody?.reasoning_effort).toBe(mod.CEREBRAS_REASONING_EFFORT);
+		expect(mod.CEREBRAS_REASONING_EFFORT).toBe("medium");
+	});
+
 	it("returns a clean review (no errorKind) when the model legitimately reports no issues", async () => {
 		globalThis.fetch = (async () =>
 			new Response(
