@@ -10,61 +10,71 @@
  * Field names use snake_case to match the review_findings DB table.
  */
 
-import { existsSync, readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import YAML from 'yaml'
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import YAML from "yaml";
 
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = dirname(__filename)
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
 export interface ReviewFinding {
-  file: string
-  severity: 'critical' | 'high' | 'medium' | 'low' | 'needs-verification'
-  category: string
-  description: string
-  suggested_fix: string
-  line_range: string
+	file: string;
+	severity: "critical" | "high" | "medium" | "low" | "needs-verification";
+	category: string;
+	description: string;
+	suggested_fix: string;
+	line_range: string;
 }
 
 export interface ReviewPattern {
-  name: string
-  severity: string
-  description: string
+	name: string;
+	severity: string;
+	description: string;
 }
 
 export interface ReviewPatterns {
-  version: number
-  categories: Record<string, { patterns: ReviewPattern[] }>
-  'additional-checks': ReviewPattern[]
-  'severity-guide': Record<string, string>
-  'review-rules'?: string[]
-  'review-process'?: string[]
+	version: number;
+	categories: Record<string, { patterns: ReviewPattern[] }>;
+	"additional-checks": ReviewPattern[];
+	"severity-guide": Record<string, string>;
+	"review-rules"?: string[];
+	"review-process"?: string[];
 }
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const DEFAULT_YAML_PATH = join(__dirname, '..', '..', 'templates', 'review-patterns.yaml')
+const DEFAULT_YAML_PATH = join(
+	__dirname,
+	"..",
+	"..",
+	"templates",
+	"review-patterns.yaml",
+);
 
 const CATEGORY_TITLES: Record<string, string> = {
-  security: 'Security',
-  'error-handling': 'Error handling',
-  configuration: 'Configuration',
-  'data-integrity': 'Data integrity',
-}
+	security: "Security",
+	"error-handling": "Error handling",
+	configuration: "Configuration",
+	"data-integrity": "Data integrity",
+};
 
 /**
  * Required sections in a PR body, per docs/glossary.md "PR" recipe step 10.
  * Used by the PR-structure check to flag missing or vague sections.
  */
-export const PR_BODY_REQUIRED_SECTIONS = ['## Summary', '## Changes', '## Test Plan'] as const
+export const PR_BODY_REQUIRED_SECTIONS = [
+	"## Summary",
+	"## Changes",
+	"## Test Plan",
+] as const;
 
 export const PR_BODY_CONDITIONAL_SECTIONS = [
-  '## Operator Deploy Steps', // required if PR touches production
-  '## Expected Outcomes', // required on non-trivial PRs
-] as const
+	"## Operator Deploy Steps", // required if PR touches production
+	"## Expected Outcomes", // required on non-trivial PRs
+] as const;
 
 /**
  * Reusable PR-structure rule, injected into both buildReviewPrompt() and FALLBACK_PROMPT
@@ -84,7 +94,7 @@ Flag as HIGH severity:
 - \`## Expected Outcomes\` items without verifiable acceptance criteria (e.g. "verify it works", "should be fine", no \`- [ ]\` checklist)
 - \`## Test Plan\` post-merge items (\`- [ ]\`) that are not runnable commands
 
-The finding's \`file\` field for these checks is the literal string \`PR_BODY\` (not a source file path), and \`line_range\` is the section name (e.g. "## Operator Deploy Steps").`
+The finding's \`file\` field for these checks is the literal string \`PR_BODY\` (not a source file path), and \`line_range\` is the section name (e.g. "## Operator Deploy Steps").`;
 
 /**
  * Mandatory engineering rules, injected alongside PR_STRUCTURE_RULE into both
@@ -126,7 +136,7 @@ Evaluate the diff against the rules below. For ANY real violation visible in the
 
 15. English-only string sets in a multilingual codebase. CRITICAL when: a whitelist, category list, keyword filter, allowlist, or any hardcoded string set used to match/gate/route data is English-only while the code processes multilingual data (e.g. a fleet whose sources return Portuguese/Spanish). An English-only match silently drops non-English records — this is data loss, not a missed feature — so verify locale coverage of every hardcoded string set.
 
-16. Unbounded logs. HIGH when: a new or modified app, service, script, cron job, or container writes a log with no size bound or rotation — no logrotate stanza (\`copytruncate\` for a writer that holds the fd open, \`create\` for one that reopens per run), no docker \`log-opts\` \`max-size\`/\`max-file\`, no journald \`SystemMaxUse\`, or a home-grown rotation that a short-lived / cron process never fires. Every log must have a size cap and retention.`
+16. Unbounded logs. HIGH when: a new or modified app, service, script, cron job, or container writes a log with no size bound or rotation — no logrotate stanza (\`copytruncate\` for a writer that holds the fd open, \`create\` for one that reopens per run), no docker \`log-opts\` \`max-size\`/\`max-file\`, no journald \`SystemMaxUse\`, or a home-grown rotation that a short-lived / cron process never fires. Every log must have a size cap and retention.`;
 
 /**
  * Standardized output schema description for all diff review prompts.
@@ -138,20 +148,23 @@ export const REVIEW_OUTPUT_SCHEMA = `Output ONLY a JSON array of findings. Each 
 - "category": short category name (e.g. "security", "error-handling", "testing", "logging", "hardcoded-value", "dead-code", "config", "data-integrity")
 - "description": concise description of the issue
 - "suggested_fix": brief suggestion for how to fix it
-- "line_range": approximate line range from the diff (e.g. "+42-+55")`
+- "line_range": approximate line range from the diff (e.g. "+42-+55")`;
 
 // ── YAML loader ──────────────────────────────────────────────────────────────
 
 export function loadReviewPatterns(yamlPath?: string): ReviewPatterns | null {
-  const path = yamlPath || DEFAULT_YAML_PATH
-  try {
-    if (!existsSync(path)) return null
-    const raw = readFileSync(path, 'utf-8')
-    return YAML.parse(raw) as ReviewPatterns
-  } catch (err) {
-    console.warn(`[review-prompt] Failed to load review patterns from ${path}:`, err)
-    return null
-  }
+	const path = yamlPath || DEFAULT_YAML_PATH;
+	try {
+		if (!existsSync(path)) return null;
+		const raw = readFileSync(path, "utf-8");
+		return YAML.parse(raw) as ReviewPatterns;
+	} catch (err) {
+		console.warn(
+			`[review-prompt] Failed to load review patterns from ${path}:`,
+			err,
+		);
+		return null;
+	}
 }
 
 // ── Fallback prompt ──────────────────────────────────────────────────────────
@@ -226,89 +239,91 @@ Severity guide:
 
 If the code looks clean, return an empty array: []
 
-Respond with ONLY the JSON array, no markdown fencing, no explanation.`
+Respond with ONLY the JSON array, no markdown fencing, no explanation.`;
 
 // ── Prompt builder ───────────────────────────────────────────────────────────
 
 export function buildReviewPrompt(yamlPath?: string): string {
-  const patterns = loadReviewPatterns(yamlPath)
-  if (!patterns) return FALLBACK_PROMPT
+	const patterns = loadReviewPatterns(yamlPath);
+	if (!patterns) return FALLBACK_PROMPT;
 
-  const lines: string[] = []
-  lines.push(
-    'You are a senior code reviewer. You will receive the full source files for context followed by the git diff to review. Use the full file context to understand the broader codebase patterns, existing error handling, and architecture before flagging issues in the diff.'
-  )
+	const lines: string[] = [];
+	lines.push(
+		"You are a senior code reviewer. You will receive the full source files for context followed by the git diff to review. Use the full file context to understand the broader codebase patterns, existing error handling, and architecture before flagging issues in the diff.",
+	);
 
-  // Review rules (non-negotiable)
-  const reviewRules = patterns['review-rules']
-  if (reviewRules?.length) {
-    lines.push('')
-    lines.push('## Review rules (non-negotiable)')
-    for (const rule of reviewRules) {
-      lines.push(`- ${rule}`)
-    }
-  }
+	// Review rules (non-negotiable)
+	const reviewRules = patterns["review-rules"];
+	if (reviewRules?.length) {
+		lines.push("");
+		lines.push("## Review rules (non-negotiable)");
+		for (const rule of reviewRules) {
+			lines.push(`- ${rule}`);
+		}
+	}
 
-  // Review process
-  const reviewProcess = patterns['review-process']
-  if (reviewProcess?.length) {
-    lines.push('')
-    lines.push('## Review process')
-    for (const step of reviewProcess) {
-      lines.push(`- ${step}`)
-    }
-  }
+	// Review process
+	const reviewProcess = patterns["review-process"];
+	if (reviewProcess?.length) {
+		lines.push("");
+		lines.push("## Review process");
+		for (const step of reviewProcess) {
+			lines.push(`- ${step}`);
+		}
+	}
 
-  lines.push('')
-  lines.push('## Critical patterns (always flag as critical or high)')
+	lines.push("");
+	lines.push("## Critical patterns (always flag as critical or high)");
 
-  for (const [catKey, cat] of Object.entries(patterns.categories)) {
-    const title = CATEGORY_TITLES[catKey] || catKey
-    lines.push('')
-    lines.push(`### ${title}`)
-    for (const p of cat.patterns) {
-      lines.push(`- ${p.description}`)
-    }
-  }
+	for (const [catKey, cat] of Object.entries(patterns.categories)) {
+		const title = CATEGORY_TITLES[catKey] || catKey;
+		lines.push("");
+		lines.push(`### ${title}`);
+		for (const p of cat.patterns) {
+			lines.push(`- ${p.description}`);
+		}
+	}
 
-  // PR structure rule — applies to all repos, injected here so it survives even
-  // when categories come from a per-repo YAML override.
-  lines.push('')
-  lines.push(PR_STRUCTURE_RULE)
+	// PR structure rule — applies to all repos, injected here so it survives even
+	// when categories come from a per-repo YAML override.
+	lines.push("");
+	lines.push(PR_STRUCTURE_RULE);
 
-  // Mandatory engineering rules — high-frequency review-finding categories that
-  // must gate merges. Injected next to PR_STRUCTURE_RULE so they survive even
-  // when categories come from a per-repo YAML override.
-  lines.push('')
-  lines.push(ENGINEERING_RULES)
+	// Mandatory engineering rules — high-frequency review-finding categories that
+	// must gate merges. Injected next to PR_STRUCTURE_RULE so they survive even
+	// when categories come from a per-repo YAML override.
+	lines.push("");
+	lines.push(ENGINEERING_RULES);
 
-  const additionalChecks = patterns['additional-checks']
-  if (additionalChecks?.length) {
-    lines.push('')
-    lines.push('## Additional checks')
-    for (const c of additionalChecks) {
-      lines.push(`- ${c.description}`)
-    }
-  }
+	const additionalChecks = patterns["additional-checks"];
+	if (additionalChecks?.length) {
+		lines.push("");
+		lines.push("## Additional checks");
+		for (const c of additionalChecks) {
+			lines.push(`- ${c.description}`);
+		}
+	}
 
-  lines.push('')
-  lines.push('## Output format')
-  lines.push('')
-  lines.push(REVIEW_OUTPUT_SCHEMA)
+	lines.push("");
+	lines.push("## Output format");
+	lines.push("");
+	lines.push(REVIEW_OUTPUT_SCHEMA);
 
-  const severityGuide = patterns['severity-guide']
-  if (severityGuide) {
-    lines.push('')
-    lines.push('Severity guide:')
-    for (const [level, desc] of Object.entries(severityGuide)) {
-      lines.push(`- ${level}: ${desc}`)
-    }
-  }
+	const severityGuide = patterns["severity-guide"];
+	if (severityGuide) {
+		lines.push("");
+		lines.push("Severity guide:");
+		for (const [level, desc] of Object.entries(severityGuide)) {
+			lines.push(`- ${level}: ${desc}`);
+		}
+	}
 
-  lines.push('')
-  lines.push('If the code looks clean, return an empty array: []')
-  lines.push('')
-  lines.push('Respond with ONLY the JSON array, no markdown fencing, no explanation.')
+	lines.push("");
+	lines.push("If the code looks clean, return an empty array: []");
+	lines.push("");
+	lines.push(
+		"Respond with ONLY the JSON array, no markdown fencing, no explanation.",
+	);
 
-  return lines.join('\n')
+	return lines.join("\n");
 }
