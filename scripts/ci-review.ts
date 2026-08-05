@@ -34,8 +34,17 @@ const CI_TIMEOUT_MS = 60_000;
 const MAX_CONTEXT_CHARS = 400_000; // hard char cap on the raw diff (defense in depth)
 const MAX_DIFF_SIZE = MAX_CONTEXT_CHARS; // kept as alias for parseDiff compat
 const BUDGET_PER_FILE = 50_000; // cap individual file content in context
+
+// Parse an integer env override, falling back when unset/NaN/below `min`. Using
+// `||` here would be wrong: Number("0") is falsy, so a deliberate 0 (e.g.
+// CI_REVIEW_RETRY_DELAY_MS=0 in tests) would silently restore the default.
+function readIntEnv(name: string, fallback: number, min: number): number {
+	const value = Number(process.env[name]);
+	return Number.isSafeInteger(value) && value >= min ? value : fallback;
+}
+
 // Env-overridable so tests can disable the wait (CI_REVIEW_RETRY_DELAY_MS=0).
-const RETRY_DELAY_MS = Number(process.env.CI_REVIEW_RETRY_DELAY_MS) || 2_000;
+const RETRY_DELAY_MS = readIntEnv("CI_REVIEW_RETRY_DELAY_MS", 2_000, 0);
 // One retry (2 attempts total). A retry triggered by finish_reason=length ESCALATES
 // the completion budget (see nextCompletionBudget) instead of repeating the same
 // request — a length-truncated reply fails identically if retried unchanged.
@@ -59,13 +68,20 @@ const MODEL_CONTEXT_TOKENS = 131_072; // zai-glm-4.7 hard context window (input 
 // common case emits its JSON on the first attempt (finish_reason="stop"), and a
 // length-truncated attempt ESCALATES toward MAX_COMPLETION_TOKENS_CEILING on retry
 // rather than repeating the same request. Both are env-overridable.
-const MAX_COMPLETION_TOKENS =
-	Number(process.env.CI_REVIEW_MAX_COMPLETION_TOKENS) || 40_960;
+const MAX_COMPLETION_TOKENS = readIntEnv(
+	"CI_REVIEW_MAX_COMPLETION_TOKENS",
+	40_960,
+	1,
+);
 // Ceiling the length-truncation retries climb toward. Holds GLM reasoning PLUS the
 // JSON array for a normal PR while staying below the context window (a tiny PR's
-// input is ~13K tokens, so 13K + 65536 << 131072).
-const MAX_COMPLETION_TOKENS_CEILING =
-	Number(process.env.CI_REVIEW_MAX_COMPLETION_TOKENS_CEILING) || 65_536;
+// input is ~13K tokens, so 13K + 65536 << 131072). Clamped to at least the base
+// budget so a misconfigured lower ceiling can never make nextCompletionBudget()
+// shrink the budget after a truncation.
+const MAX_COMPLETION_TOKENS_CEILING = Math.max(
+	MAX_COMPLETION_TOKENS,
+	readIntEnv("CI_REVIEW_MAX_COMPLETION_TOKENS_CEILING", 65_536, 1),
+);
 // Conservative chars-per-token: real payloads have measured ~3.6 chars/token, so
 // dividing by 3.5 slightly OVER-estimates token count — erring toward trimming.
 const CHARS_PER_TOKEN = 3.5;
@@ -1172,6 +1188,7 @@ export {
 	parseDiff,
 	parseFindings,
 	postPrReview,
+	readIntEnv,
 	reviewEvent,
 	salvageObjects,
 	stripCodeFences,

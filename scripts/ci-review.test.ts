@@ -244,7 +244,39 @@ describe("salvageObjects", () => {
 	});
 });
 
+describe("readIntEnv", () => {
+	const KEY = "CI_REVIEW_TEST_INT_ENV";
+	afterEach(() => {
+		delete process.env[KEY];
+	});
+
+	it("returns the fallback when the env var is unset", () => {
+		expect(mod.readIntEnv(KEY, 2_000, 0)).toBe(2_000);
+	});
+	it("honours a deliberate 0 when min is 0 (the retry-delay case that `||` broke)", () => {
+		process.env[KEY] = "0";
+		expect(mod.readIntEnv(KEY, 2_000, 0)).toBe(0);
+	});
+	it("parses a positive integer override", () => {
+		process.env[KEY] = "50000";
+		expect(mod.readIntEnv(KEY, 40_960, 1)).toBe(50_000);
+	});
+	it("falls back on a value below min (e.g. 0 tokens) or a non-number", () => {
+		process.env[KEY] = "0";
+		expect(mod.readIntEnv(KEY, 40_960, 1)).toBe(40_960);
+		process.env[KEY] = "not-a-number";
+		expect(mod.readIntEnv(KEY, 40_960, 1)).toBe(40_960);
+	});
+});
+
 describe("nextCompletionBudget", () => {
+	it("never lets the ceiling drop below the base budget", () => {
+		// Clamp invariant: even a misconfigured lower ceiling env can't make an
+		// escalation shrink the budget.
+		expect(mod.MAX_COMPLETION_TOKENS_CEILING).toBeGreaterThanOrEqual(
+			mod.MAX_COMPLETION_TOKENS,
+		);
+	});
 	it("doubles the budget on a length truncation", () => {
 		expect(mod.nextCompletionBudget(mod.MAX_COMPLETION_TOKENS)).toBe(
 			Math.min(mod.MAX_COMPLETION_TOKENS * 2, mod.MAX_COMPLETION_TOKENS_CEILING),
