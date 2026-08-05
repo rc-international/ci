@@ -8,6 +8,8 @@ import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 
 // Suppress main() (which does network + gh calls + process.exit) on import.
 process.env.__CI_REVIEW_TEST = "1";
+// Disable the inter-attempt retry delay so escalation/parse_error tests don't wait.
+process.env.CI_REVIEW_RETRY_DELAY_MS = "0";
 
 let mod: typeof import("./ci-review");
 let realFetch: typeof globalThis.fetch;
@@ -242,6 +244,22 @@ describe("salvageObjects", () => {
 	});
 });
 
+describe("nextCompletionBudget", () => {
+	it("doubles the budget on a length truncation", () => {
+		expect(mod.nextCompletionBudget(mod.MAX_COMPLETION_TOKENS)).toBe(
+			Math.min(mod.MAX_COMPLETION_TOKENS * 2, mod.MAX_COMPLETION_TOKENS_CEILING),
+		);
+	});
+	it("caps at the ceiling and never exceeds it", () => {
+		expect(mod.nextCompletionBudget(mod.MAX_COMPLETION_TOKENS_CEILING)).toBe(
+			mod.MAX_COMPLETION_TOKENS_CEILING,
+		);
+		expect(
+			mod.nextCompletionBudget(mod.MAX_COMPLETION_TOKENS_CEILING * 10),
+		).toBe(mod.MAX_COMPLETION_TOKENS_CEILING);
+	});
+});
+
 describe("callCerebras parse handling", () => {
 	it("returns parse_error (NOT a clean 0-findings review) on a truncated completion", async () => {
 		// 2xx response whose message content is a truncated JSON array. Old code
@@ -288,6 +306,65 @@ describe("callCerebras parse handling", () => {
 		expect(res.apiError).toBe(false);
 		expect(res.findings).toHaveLength(1);
 		expect(res.findings[0].file).toBe("a.ts");
+	});
+
+	it("escalates max_completion_tokens after a finish_reason=length, 0-char reply and succeeds on retry", async () => {
+		// The exact valors-mobile#255 incident: a tiny PR whose whole completion
+		// budget is consumed by GLM reasoning tokens, so the first reply is
+		// finish_reason=length with 0 content chars. The old code retried the SAME
+		// budget and truncated identically → parse_error skip. It must now ESCALATE
+		// the completion budget on the retry and parse the (now complete) reply.
+		const budgets: number[] = [];
+		let call = 0;
+		globalThis.fetch = (async (_url: unknown, init: { body: string }) => {
+			budgets.push(JSON.parse(init.body).max_completion_tokens);
+			call++;
+			if (call === 1) {
+				return new Response(
+					JSON.stringify({
+						choices: [{ message: { content: "" }, finish_reason: "length" }],
+					}),
+					{ status: 200 },
+				);
+			}
+			return new Response(
+				JSON.stringify({
+					choices: [{ message: { content: "[]" }, finish_reason: "stop" }],
+				}),
+				{ status: 200 },
+			);
+		}) as unknown as typeof globalThis.fetch;
+
+		const res = await mod.callCerebras("test-key", "tiny diff", "", "");
+		expect(res.errorKind).toBeUndefined();
+		expect(res.apiError).toBe(false);
+		expect(res.findings).toHaveLength(0);
+		// Two attempts, and the second used a STRICTLY LARGER completion budget.
+		expect(budgets).toHaveLength(2);
+		expect(budgets[0]).toBe(mod.MAX_COMPLETION_TOKENS);
+		expect(budgets[1]).toBeGreaterThan(budgets[0]);
+	});
+
+	it("does NOT escalate the budget when a COMPLETE reply (finish_reason=stop) fails to parse", async () => {
+		// More tokens can't fix malformed-but-complete JSON, so a stop-truncated
+		// parse failure must retry at the SAME budget, then surface parse_error.
+		const budgets: number[] = [];
+		globalThis.fetch = (async (_url: unknown, init: { body: string }) => {
+			budgets.push(JSON.parse(init.body).max_completion_tokens);
+			return new Response(
+				JSON.stringify({
+					choices: [
+						{ message: { content: "not json at all" }, finish_reason: "stop" },
+					],
+				}),
+				{ status: 200 },
+			);
+		}) as unknown as typeof globalThis.fetch;
+
+		const res = await mod.callCerebras("test-key", "some diff", "", "");
+		expect(res.errorKind).toBe("parse_error");
+		expect(budgets).toHaveLength(2);
+		expect(budgets[1]).toBe(budgets[0]); // unchanged — no escalation
 	});
 
 	it("returns a clean review (no errorKind) when the model legitimately reports no issues", async () => {

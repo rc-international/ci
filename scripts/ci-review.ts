@@ -34,7 +34,11 @@ const CI_TIMEOUT_MS = 60_000;
 const MAX_CONTEXT_CHARS = 400_000; // hard char cap on the raw diff (defense in depth)
 const MAX_DIFF_SIZE = MAX_CONTEXT_CHARS; // kept as alias for parseDiff compat
 const BUDGET_PER_FILE = 50_000; // cap individual file content in context
-const RETRY_DELAY_MS = 2_000;
+// Env-overridable so tests can disable the wait (CI_REVIEW_RETRY_DELAY_MS=0).
+const RETRY_DELAY_MS = Number(process.env.CI_REVIEW_RETRY_DELAY_MS) || 2_000;
+// One retry (2 attempts total). A retry triggered by finish_reason=length ESCALATES
+// the completion budget (see nextCompletionBudget) instead of repeating the same
+// request — a length-truncated reply fails identically if retried unchanged.
 const MAX_RETRIES = 1;
 
 // ── Token budgeting ──────────────────────────────────────────────────────────
@@ -43,20 +47,34 @@ const MAX_RETRIES = 1;
 // this: a diff well under MAX_CONTEXT_CHARS plus unbounded full-file context can
 // still blow the token limit. So we estimate tokens and trim BEFORE sending.
 const MODEL_CONTEXT_TOKENS = 131_072; // zai-glm-4.7 hard context window (input + output)
-// The model's reply is a JSON array of verbose finding objects and the prompt
-// enforces 16 mandatory HIGH engineering rules, so a finding-heavy diff routinely
-// blew the old 8192 cap → finish_reason "length" → truncated array → parse_error
-// skip that never approved. 24576 (24K) gives the reply ~3x the room while keeping
-// the input budget comfortably large: INPUT_TOKEN_BUDGET below works out to
-// floor(131072 * 0.9) - 24576 = 93388 tokens (>= 90K) for prompt + PR body +
-// context + diff. 32768 would drop the input budget to ~85K (below the 90K floor),
-// so 24576 is the sweet spot.
-const MAX_COMPLETION_TOKENS = 24576; // reserved for the model's reply (mirrors the request below)
+// zai-glm-4.7 is a REASONING model: its thinking tokens count against
+// max_completion_tokens and are emitted BEFORE the answer. On a small diff the
+// model can reason exhaustively through the 16 mandatory rules and exhaust the
+// whole budget before writing a single character of JSON — the request returns
+// finish_reason="length" with 0 content chars (observed on valors-mobile#255, a
+// 1-file PR). The old 24576 cap sat below the observed reasoning length, so no
+// JSON was ever produced and both identical retries failed the same way.
+//
+// Fix: the base budget sits comfortably ABOVE the model's reasoning length so the
+// common case emits its JSON on the first attempt (finish_reason="stop"), and a
+// length-truncated attempt ESCALATES toward MAX_COMPLETION_TOKENS_CEILING on retry
+// rather than repeating the same request. Both are env-overridable.
+const MAX_COMPLETION_TOKENS =
+	Number(process.env.CI_REVIEW_MAX_COMPLETION_TOKENS) || 40_960;
+// Ceiling the length-truncation retries climb toward. Holds GLM reasoning PLUS the
+// JSON array for a normal PR while staying below the context window (a tiny PR's
+// input is ~13K tokens, so 13K + 65536 << 131072).
+const MAX_COMPLETION_TOKENS_CEILING =
+	Number(process.env.CI_REVIEW_MAX_COMPLETION_TOKENS_CEILING) || 65_536;
 // Conservative chars-per-token: real payloads have measured ~3.6 chars/token, so
 // dividing by 3.5 slightly OVER-estimates token count — erring toward trimming.
 const CHARS_PER_TOKEN = 3.5;
 const TOKEN_SAFETY_FRACTION = 0.9; // only fill 90% of the context window
-// Total input-token budget available for system prompt + PR body + context + diff.
+// Total input-token budget for system prompt + PR body + context + diff. The BASE
+// completion budget is reserved up front; a length-truncation retry may escalate
+// its completion budget above this reservation, in which case an already-large
+// input can push the escalated attempt over the context window — that returns
+// too_large and is reported accurately (a genuinely oversized review).
 const INPUT_TOKEN_BUDGET =
 	Math.floor(MODEL_CONTEXT_TOKENS * TOKEN_SAFETY_FRACTION) -
 	MAX_COMPLETION_TOKENS;
@@ -480,16 +498,27 @@ function parseFindings(
 	};
 }
 
+/**
+ * Escalate the completion-token budget after a finish_reason="length" truncation.
+ * Doubles the budget, capped at MAX_COMPLETION_TOKENS_CEILING, so a reply cut off
+ * mid-reasoning (or mid-array) gets more room on the next attempt instead of the
+ * retry repeating the same too-small request and failing identically.
+ */
+function nextCompletionBudget(current: number): number {
+	return Math.min(current * 2, MAX_COMPLETION_TOKENS_CEILING);
+}
+
 async function callCerebras(
 	apiKey: string,
 	diff: string,
 	fileContext: string,
 	prBody = "",
 ): Promise<CerebrasResult> {
+	let completionBudget = MAX_COMPLETION_TOKENS;
 	for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
 		if (attempt > 0) {
 			console.log(
-				`[ci-review] Retrying Cerebras API (attempt ${attempt + 1})...`,
+				`[ci-review] Retrying Cerebras API (attempt ${attempt + 1}, max_completion_tokens=${completionBudget})...`,
 			);
 			await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
 		}
@@ -514,7 +543,7 @@ async function callCerebras(
 						},
 					],
 					temperature: 0.1,
-					max_completion_tokens: MAX_COMPLETION_TOKENS,
+					max_completion_tokens: completionBudget,
 				}),
 				signal: controller.signal,
 			});
@@ -572,7 +601,17 @@ async function callCerebras(
 				console.error(
 					`[ci-review] Cerebras reply was incomplete/unparseable (finish_reason=${finishReason ?? "?"}, ${content.length} chars): ${reason}`,
 				);
-				if (attempt < MAX_RETRIES) continue;
+				if (attempt < MAX_RETRIES) {
+					// finish_reason=length means the reply hit the token ceiling: a retry
+					// at the SAME budget truncates identically. Escalate the completion
+					// budget so reasoning + JSON both fit. A genuine parse failure of a
+					// COMPLETE reply (finish_reason=stop) won't be helped by more tokens,
+					// so leave the budget unchanged for that case.
+					if (finishReason === "length") {
+						completionBudget = nextCompletionBudget(completionBudget);
+					}
+					continue;
+				}
 				return { findings: [], apiError: false, errorKind: "parse_error" };
 			}
 
@@ -1126,7 +1165,10 @@ export {
 	INPUT_TOKEN_BUDGET,
 	isApprovedComment,
 	isTrustedApprovalAssociation,
+	MAX_COMPLETION_TOKENS,
+	MAX_COMPLETION_TOKENS_CEILING,
 	MODEL_CONTEXT_TOKENS,
+	nextCompletionBudget,
 	parseDiff,
 	parseFindings,
 	postPrReview,
