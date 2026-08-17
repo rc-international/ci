@@ -473,6 +473,76 @@ describe("postPrReview failure signalling", () => {
 	});
 });
 
+describe("request contract", () => {
+	// Capture the exact arguments callReviewModel passes to fetch so we can assert
+	// the outgoing HTTP request contract (endpoint, auth, body shape). The Groq
+	// migration renamed these; the pre-existing tests verified response handling
+	// but never the request itself. Mirrors the fetch-capture style used by the
+	// escalation test above.
+	async function captureRequest(apiKey = "sk-test-groq-key"): Promise<{
+		url: string;
+		init: RequestInit & { headers: Record<string, string>; body: string };
+	}> {
+		let captured: { url: unknown; init: unknown } | undefined;
+		globalThis.fetch = (async (url: unknown, init: unknown) => {
+			captured = { url, init };
+			return new Response(
+				JSON.stringify({
+					choices: [{ message: { content: "[]" }, finish_reason: "stop" }],
+				}),
+				{ status: 200 },
+			);
+		}) as unknown as typeof globalThis.fetch;
+
+		await mod.callReviewModel(apiKey, "some diff", "", "");
+		if (!captured) throw new Error("fetch was not called");
+		return {
+			url: captured.url as string,
+			init: captured.init as RequestInit & {
+				headers: Record<string, string>;
+				body: string;
+			},
+		};
+	}
+
+	it("POSTs to the Groq chat/completions endpoint", async () => {
+		const { url, init } = await captureRequest();
+		expect(url).toBe("https://api.groq.com/openai/v1/chat/completions");
+		expect(init.method).toBe("POST");
+	});
+
+	it("sends the resolved API key as a Bearer Authorization header", async () => {
+		const { init } = await captureRequest("sk-my-key");
+		expect(init.headers.Authorization).toBe("Bearer sk-my-key");
+	});
+
+	it("sends Content-Type: application/json", async () => {
+		const { init } = await captureRequest();
+		expect(init.headers["Content-Type"]).toBe("application/json");
+	});
+
+	it("sends the expected model, reasoning_effort, temperature and body shape", async () => {
+		const { init } = await captureRequest();
+		const parsed = JSON.parse(init.body);
+		expect(parsed.model).toBe("openai/gpt-oss-120b");
+		expect(parsed.reasoning_effort).toBe("medium");
+		expect(parsed.temperature).toBe(0.1);
+		expect(typeof parsed.max_completion_tokens).toBe("number");
+		expect(Array.isArray(parsed.messages)).toBe(true);
+		expect(parsed.messages.length).toBeGreaterThan(0);
+	});
+
+	// NOTE on env-override coverage: REVIEW_ENDPOINT, REVIEW_MODEL and
+	// REVIEW_REASONING_EFFORT are read from process.env into module-level consts at
+	// import time (ci-review.ts lines 33-38) and are NOT exported. Setting
+	// CI_REVIEW_ENDPOINT / CI_REVIEW_MODEL / CI_REVIEW_REASONING_EFFORT after the
+	// module is imported cannot affect the already-frozen consts, and there is no
+	// seam to re-read them. So the override PATH cannot be exercised without
+	// refactoring the consts into a function (or exporting them for re-read). What
+	// IS observable — that the defaults flow verbatim into the request body — is
+	// asserted above; a false, always-passing override test is deliberately omitted.
+});
+
 describe("buildUserMessage ordering", () => {
 	it("orders PR body before file context before the diff", () => {
 		const msg = mod.buildUserMessage("DIFFTEXT", "CTXTEXT", "PRBODYTEXT");
