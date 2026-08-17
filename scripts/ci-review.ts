@@ -2,19 +2,21 @@
 /**
  * CI Code Review
  *
- * GitHub Actions workflow script: reads PR diff, calls Cerebras for review,
- * posts findings as a PR review comment. Safety net for code that bypasses
- * the wilco pre-push review pipeline.
+ * GitHub Actions workflow script: reads PR diff, calls the review model for
+ * review, posts findings as a PR review comment. Safety net for code that
+ * bypasses the wilco pre-push review pipeline.
  *
  * Usage:
  *   gh pr diff $PR_NUMBER | bun scripts/ci-review.ts
  *   bun scripts/ci-review.ts path/to/diff.txt
  *
  * Environment:
- *   CEREBRAS_API_KEY               — Cerebras API key (required in CI)
+ *   CODE_REVIEW_GROQ_API_KEY       — Groq API key (required in CI; GROQ_API_KEY also accepted)
  *   GITHUB_REPOSITORY              — owner/repo (set by GitHub Actions)
  *   PR_NUMBER                      — pull request number
- *   CEREBRAS_MODEL                 — model override (default: zai-glm-4.7)
+ *   CI_REVIEW_MODEL                — model override (default: openai/gpt-oss-120b)
+ *   CI_REVIEW_ENDPOINT             — endpoint override (default: Groq chat/completions)
+ *   CI_REVIEW_REASONING_EFFORT     — reasoning effort override (default: medium)
  */
 
 import { execFileSync } from "node:child_process";
@@ -28,8 +30,12 @@ import { buildReviewPrompt, type ReviewFinding } from "./lib/review-prompt.js";
 
 // ── Configuration ────────────────────────────────────────────────────────────
 
-const CEREBRAS_ENDPOINT = "https://api.cerebras.ai/v1/chat/completions";
-const CEREBRAS_MODEL = process.env.CEREBRAS_MODEL || "zai-glm-4.7";
+const REVIEW_ENDPOINT =
+	process.env.CI_REVIEW_ENDPOINT ||
+	"https://api.groq.com/openai/v1/chat/completions";
+const REVIEW_MODEL = process.env.CI_REVIEW_MODEL || "openai/gpt-oss-120b";
+const REVIEW_REASONING_EFFORT =
+	process.env.CI_REVIEW_REASONING_EFFORT || "medium";
 const MAX_CONTEXT_CHARS = 400_000; // hard char cap on the raw diff (defense in depth)
 const MAX_DIFF_SIZE = MAX_CONTEXT_CHARS; // kept as alias for parseDiff compat
 const BUDGET_PER_FILE = 50_000; // cap individual file content in context
@@ -44,9 +50,9 @@ function readIntEnv(name: string, fallback: number, min: number): number {
 
 // Env-overridable so tests can disable the wait (CI_REVIEW_RETRY_DELAY_MS=0).
 const RETRY_DELAY_MS = readIntEnv("CI_REVIEW_RETRY_DELAY_MS", 2_000, 0);
-// Per-request timeout for the Cerebras call. Raised from the old hardcoded 60s to
-// 3 min (env-overridable) so zai-glm-4.7's reasoning-heavy replies aren't cut off
-// mid-response when the completion budget escalates toward 65536 tokens.
+// Per-request timeout for the review-model call. Raised from the old hardcoded 60s
+// to 3 min (env-overridable) so reasoning-heavy replies aren't cut off mid-response
+// when the completion budget escalates toward 65536 tokens.
 const CI_TIMEOUT_MS = readIntEnv("CI_REVIEW_TIMEOUT_MS", 180_000, 1_000);
 // One retry (2 attempts total). A retry triggered by finish_reason=length ESCALATES
 // the completion budget (see nextCompletionBudget) instead of repeating the same
@@ -58,8 +64,8 @@ const MAX_RETRIES = 1;
 // assembled prompt exceeds its context window. Char budgets alone can't prevent
 // this: a diff well under MAX_CONTEXT_CHARS plus unbounded full-file context can
 // still blow the token limit. So we estimate tokens and trim BEFORE sending.
-const MODEL_CONTEXT_TOKENS = 131_072; // zai-glm-4.7 hard context window (input + output)
-// zai-glm-4.7 is a REASONING model: its thinking tokens count against
+const MODEL_CONTEXT_TOKENS = 131_072; // openai/gpt-oss-120b hard context window (input + output)
+// gpt-oss-120b is a REASONING model: its thinking tokens count against
 // max_completion_tokens and are emitted BEFORE the answer. On a small diff the
 // model can reason exhaustively through the 16 mandatory rules and exhaust the
 // whole budget before writing a single character of JSON — the request returns
@@ -76,7 +82,7 @@ const MAX_COMPLETION_TOKENS = readIntEnv(
 	40_960,
 	1,
 );
-// Ceiling the length-truncation retries climb toward. Holds GLM reasoning PLUS the
+// Ceiling the length-truncation retries climb toward. Holds model reasoning PLUS the
 // JSON array for a normal PR while staying below the context window (a tiny PR's
 // input is ~13K tokens, so 13K + 65536 << 131072). Clamped to at least the base
 // budget so a misconfigured lower ceiling can never make nextCompletionBudget()
@@ -123,16 +129,16 @@ const DOC_EXTENSIONS = new Set([
 // 'parse_error' — the API was reachable and returned 2xx, but the model's reply was
 //                 truncated/malformed and no findings array could be parsed. This is
 //                 NOT a clean "0 findings" review — the caller must fail loud.
-type CerebrasErrorKind =
+type ReviewErrorKind =
 	| "unavailable"
 	| "too_large"
 	| "client_error"
 	| "parse_error";
 
-interface CerebrasResult {
+interface ReviewResult {
 	findings: ReviewFinding[];
 	apiError: boolean; // true ONLY for genuine reachability failures ('unavailable')
-	errorKind?: CerebrasErrorKind;
+	errorKind?: ReviewErrorKind;
 	tokenInfo?: { current: number; limit: number }; // parsed from a too_large response
 }
 
@@ -319,7 +325,7 @@ function budgetPayload(
 	};
 }
 
-// ── Cerebras API call ────────────────────────────────────────────────────────
+// ── Review model API call ─────────────────────────────────────────────────────
 
 const REVIEW_PROMPT = buildReviewPrompt();
 
@@ -379,7 +385,7 @@ function getManualApprovalFromEnv(
 }
 
 /**
- * Classify a non-2xx Cerebras HTTP response. Distinguishes a payload that is too
+ * Classify a non-2xx review-model HTTP response. Distinguishes a payload that is too
  * large (400 context_length_exceeded — reachable API, our fault) from a genuine
  * availability failure (5xx, rate limit, invalid/expired key). Only the latter
  * should surface to users as "API unavailable".
@@ -387,7 +393,7 @@ function getManualApprovalFromEnv(
 function classifyHttpError(
 	status: number,
 	body: string,
-): { kind: CerebrasErrorKind; tokenInfo?: { current: number; limit: number } } {
+): { kind: ReviewErrorKind; tokenInfo?: { current: number; limit: number } } {
 	// Context-window overflow: the request reached the API but the prompt is too big.
 	if (
 		/context_length_exceeded/i.test(body) ||
@@ -527,17 +533,17 @@ function nextCompletionBudget(current: number): number {
 	return Math.min(current * 2, MAX_COMPLETION_TOKENS_CEILING);
 }
 
-async function callCerebras(
+async function callReviewModel(
 	apiKey: string,
 	diff: string,
 	fileContext: string,
 	prBody = "",
-): Promise<CerebrasResult> {
+): Promise<ReviewResult> {
 	let completionBudget = MAX_COMPLETION_TOKENS;
 	for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
 		if (attempt > 0) {
 			console.log(
-				`[ci-review] Retrying Cerebras API (attempt ${attempt + 1}, max_completion_tokens=${completionBudget})...`,
+				`[ci-review] Retrying Groq API (attempt ${attempt + 1}, max_completion_tokens=${completionBudget})...`,
 			);
 			await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
 		}
@@ -546,14 +552,14 @@ async function callCerebras(
 		const timeout = setTimeout(() => controller.abort(), CI_TIMEOUT_MS);
 
 		try {
-			const response = await fetch(CEREBRAS_ENDPOINT, {
+			const response = await fetch(REVIEW_ENDPOINT, {
 				method: "POST",
 				headers: {
 					"Content-Type": "application/json",
 					Authorization: `Bearer ${apiKey}`,
 				},
 				body: JSON.stringify({
-					model: CEREBRAS_MODEL,
+					model: REVIEW_MODEL,
 					messages: [
 						{ role: "system", content: REVIEW_PROMPT },
 						{
@@ -563,6 +569,7 @@ async function callCerebras(
 					],
 					temperature: 0.1,
 					max_completion_tokens: completionBudget,
+					reasoning_effort: REVIEW_REASONING_EFFORT,
 				}),
 				signal: controller.signal,
 			});
@@ -570,7 +577,7 @@ async function callCerebras(
 			if (!response.ok) {
 				const body = await response.text().catch(() => "");
 				console.error(
-					`[ci-review] Cerebras API returned ${response.status}: ${body.slice(0, 200)}`,
+					`[ci-review] Groq API returned ${response.status}: ${body.slice(0, 200)}`,
 				);
 				const cls = classifyHttpError(response.status, body);
 				// Payload/client errors are deterministic — retrying sends the same body,
@@ -618,7 +625,7 @@ async function callCerebras(
 					? "completion truncated (finish_reason=length), nothing salvageable"
 					: parsed.error;
 				console.error(
-					`[ci-review] Cerebras reply was incomplete/unparseable (finish_reason=${finishReason ?? "?"}, ${content.length} chars): ${reason}`,
+					`[ci-review] Groq reply was incomplete/unparseable (finish_reason=${finishReason ?? "?"}, ${content.length} chars): ${reason}`,
 				);
 				if (attempt < MAX_RETRIES) {
 					// finish_reason=length means the reply hit the token ceiling: a retry
@@ -636,7 +643,7 @@ async function callCerebras(
 
 			if (finishReason === "length" || parsed.truncated) {
 				console.warn(
-					`[ci-review] Cerebras reply was truncated (finish_reason=${finishReason ?? "?"}); salvaged ${parsed.findings.length} complete finding(s) — review is PARTIAL.`,
+					`[ci-review] Groq reply was truncated (finish_reason=${finishReason ?? "?"}); salvaged ${parsed.findings.length} complete finding(s) — review is PARTIAL.`,
 				);
 			}
 
@@ -660,10 +667,10 @@ async function callCerebras(
 		} catch (err: any) {
 			if (err?.name === "AbortError") {
 				console.error(
-					`[ci-review] Cerebras API timed out (${CI_TIMEOUT_MS / 1000}s limit)`,
+					`[ci-review] Groq API timed out (${CI_TIMEOUT_MS / 1000}s limit)`,
 				);
 			} else {
-				console.error("[ci-review] Cerebras API error:", err?.message || err);
+				console.error("[ci-review] Groq API error:", err?.message || err);
 			}
 			if (attempt < MAX_RETRIES) continue;
 			return { findings: [], apiError: true, errorKind: "unavailable" };
@@ -917,7 +924,8 @@ async function postPrReview(
 async function main(): Promise<void> {
 	const prNumber = process.env.PR_NUMBER;
 	const repo = process.env.GITHUB_REPOSITORY;
-	const apiKey = process.env.CEREBRAS_API_KEY;
+	const apiKey =
+		process.env.CODE_REVIEW_GROQ_API_KEY || process.env.GROQ_API_KEY;
 
 	if (!prNumber || !repo) {
 		console.error("[ci-review] PR_NUMBER and GITHUB_REPOSITORY must be set");
@@ -942,7 +950,7 @@ async function main(): Promise<void> {
 				"",
 				`Accepted \`${APPROVAL_COMMENT}\` comment from rc-int ${manualApproval.association.toLowerCase()} \`${manualApproval.author}\`.`,
 				"",
-				"This is the manual fallback for times when the Cerebras automated review is unavailable.",
+				"This is the manual fallback for times when the automated review is unavailable.",
 			].join("\n"),
 		);
 		process.exit(0);
@@ -995,7 +1003,9 @@ async function main(): Promise<void> {
 	}
 
 	if (!apiKey) {
-		console.warn("[ci-review] CEREBRAS_API_KEY not set. Skipping review.");
+		console.warn(
+			"[ci-review] CODE_REVIEW_GROQ_API_KEY not set. Skipping review.",
+		);
 		await postPrReview(
 			prNumber,
 			repo,
@@ -1037,7 +1047,7 @@ async function main(): Promise<void> {
 		);
 	}
 
-	const result = await callCerebras(
+	const result = await callReviewModel(
 		apiKey,
 		budget.diff,
 		budget.fileContext,
@@ -1050,7 +1060,7 @@ async function main(): Promise<void> {
 		const limit = result.tokenInfo?.limit ?? INPUT_TOKEN_BUDGET;
 		const current = result.tokenInfo?.current ?? budget.estimatedInputTokens;
 		console.warn(
-			"[ci-review] Cerebras rejected payload as too large. Posting diff-too-large notice.",
+			"[ci-review] Groq rejected payload as too large. Posting diff-too-large notice.",
 		);
 		await postPrReview(
 			prNumber,
@@ -1063,7 +1073,7 @@ async function main(): Promise<void> {
 
 	if (result.errorKind === "client_error") {
 		console.warn(
-			"[ci-review] Cerebras rejected the review request (client error). Posting notice.",
+			"[ci-review] Groq rejected the review request (client error). Posting notice.",
 		);
 		await postPrReview(
 			prNumber,
@@ -1075,7 +1085,7 @@ async function main(): Promise<void> {
 	}
 
 	if (result.apiError) {
-		console.warn("[ci-review] Cerebras API unavailable. Posting skip notice.");
+		console.warn("[ci-review] Groq API unavailable. Posting skip notice.");
 		await postPrReview(
 			prNumber,
 			repo,
@@ -1093,7 +1103,7 @@ async function main(): Promise<void> {
 		// non-blocking skip notice (mirrors the apiError/client_error paths) so a
 		// maintainer can re-run the check without the PR going red.
 		console.error(
-			`[ci-review] Unrecoverable: Cerebras returned an unparseable review for ${repo}#${prNumber} after ${MAX_RETRIES + 1} attempt(s). Posting a skip notice instead of an empty review.`,
+			`[ci-review] Unrecoverable: Groq returned an unparseable review for ${repo}#${prNumber} after ${MAX_RETRIES + 1} attempt(s). Posting a skip notice instead of an empty review.`,
 		);
 		await postPrReview(
 			prNumber,
@@ -1166,11 +1176,11 @@ export {
 	budgetPayload,
 	buildReviewPrompt,
 	buildUserMessage,
-	type CerebrasErrorKind,
-	type CerebrasResult,
 	CI_TIMEOUT_MS,
-	callCerebras,
+	callReviewModel,
 	classifyHttpError,
+	type ReviewErrorKind,
+	type ReviewResult,
 	type DiffFileSection,
 	type DiffInfo,
 	estimateTokens,

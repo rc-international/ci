@@ -121,7 +121,7 @@ describe("over-limit prompt handling", () => {
 		expect(body).not.toContain("API unavailable");
 	});
 
-	it("callCerebras returns too_large (not apiError) on a 400 context_length_exceeded", async () => {
+	it("callReviewModel returns too_large (not apiError) on a 400 context_length_exceeded", async () => {
 		const body = JSON.stringify({
 			message:
 				"Please reduce the length of the messages or completion. Current length is 136333 while limit is 131072",
@@ -130,7 +130,7 @@ describe("over-limit prompt handling", () => {
 		globalThis.fetch = (async () =>
 			new Response(body, { status: 400 })) as typeof globalThis.fetch;
 
-		const res = await mod.callCerebras("test-key", "some diff", "", "");
+		const res = await mod.callReviewModel("test-key", "some diff", "", "");
 		expect(res.apiError).toBe(false);
 		expect(res.errorKind).toBe("too_large");
 		expect(res.tokenInfo).toEqual({ current: 136333, limit: 131072 });
@@ -315,7 +315,7 @@ describe("nextCompletionBudget", () => {
 	});
 });
 
-describe("callCerebras parse handling", () => {
+describe("callReviewModel parse handling", () => {
 	it("returns parse_error (NOT a clean 0-findings review) on a truncated completion", async () => {
 		// 2xx response whose message content is a truncated JSON array. Old code
 		// returned { findings: [], apiError: false } — indistinguishable from a real
@@ -333,7 +333,7 @@ describe("callCerebras parse handling", () => {
 				{ status: 200 },
 			)) as typeof globalThis.fetch;
 
-		const res = await mod.callCerebras("test-key", "some diff", "", "");
+		const res = await mod.callReviewModel("test-key", "some diff", "", "");
 		expect(res.findings).toHaveLength(0);
 		expect(res.apiError).toBe(false);
 		expect(res.errorKind).toBe("parse_error");
@@ -356,7 +356,7 @@ describe("callCerebras parse handling", () => {
 				{ status: 200 },
 			)) as typeof globalThis.fetch;
 
-		const res = await mod.callCerebras("test-key", "some diff", "", "");
+		const res = await mod.callReviewModel("test-key", "some diff", "", "");
 		expect(res.errorKind).toBeUndefined();
 		expect(res.apiError).toBe(false);
 		expect(res.findings).toHaveLength(1);
@@ -390,7 +390,7 @@ describe("callCerebras parse handling", () => {
 			);
 		}) as unknown as typeof globalThis.fetch;
 
-		const res = await mod.callCerebras("test-key", "tiny diff", "", "");
+		const res = await mod.callReviewModel("test-key", "tiny diff", "", "");
 		expect(res.errorKind).toBeUndefined();
 		expect(res.apiError).toBe(false);
 		expect(res.findings).toHaveLength(0);
@@ -416,7 +416,7 @@ describe("callCerebras parse handling", () => {
 			);
 		}) as unknown as typeof globalThis.fetch;
 
-		const res = await mod.callCerebras("test-key", "some diff", "", "");
+		const res = await mod.callReviewModel("test-key", "some diff", "", "");
 		expect(res.errorKind).toBe("parse_error");
 		expect(budgets).toHaveLength(2);
 		expect(budgets[1]).toBe(budgets[0]); // unchanged — no escalation
@@ -431,7 +431,7 @@ describe("callCerebras parse handling", () => {
 				{ status: 200 },
 			)) as typeof globalThis.fetch;
 
-		const res = await mod.callCerebras("test-key", "some diff", "", "");
+		const res = await mod.callReviewModel("test-key", "some diff", "", "");
 		expect(res.findings).toHaveLength(0);
 		expect(res.apiError).toBe(false);
 		expect(res.errorKind).toBeUndefined();
