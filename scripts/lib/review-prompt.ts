@@ -3,7 +3,7 @@
  *
  * Single source of truth for diff review prompts used by:
  * - pre-push session review (Cerebras)
- * - CI code review (Cerebras)
+ * - CI code review (Groq)
  * - session-end structured review (Haiku)
  *
  * All prompts are built from templates/review-patterns.yaml.
