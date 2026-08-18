@@ -27,67 +27,14 @@
 // inside main() (after this assignment has run) rather than at the top.
 process.env.__CI_REVIEW_TEST ||= "1";
 
-import { readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import type { ReviewFinding } from "../scripts/lib/review-prompt.js";
+import { loadFixtures, readRuns } from "./load-fixtures.js";
 import {
 	aggregate,
-	type FixtureLabel,
 	type FixtureRun,
 	type FixtureScore,
 	scoreFixture,
 } from "./score.js";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const FIXTURES_DIR = join(__dirname, "fixtures");
-
-interface Fixture {
-	name: string;
-	diff: string;
-	label: FixtureLabel;
-}
-
-/** Load every <name>.diff / <name>.expected.json pair from eval/fixtures/. */
-function loadFixtures(): Fixture[] {
-	const entries = readdirSync(FIXTURES_DIR)
-		.filter((f) => f.endsWith(".diff"))
-		.sort();
-
-	const fixtures: Fixture[] = [];
-	for (const diffFile of entries) {
-		const name = diffFile.replace(/\.diff$/, "");
-		const diffPath = join(FIXTURES_DIR, diffFile);
-		const labelPath = join(FIXTURES_DIR, `${name}.expected.json`);
-
-		let diff: string;
-		let label: FixtureLabel;
-		try {
-			diff = readFileSync(diffPath, "utf8");
-			label = JSON.parse(readFileSync(labelPath, "utf8")) as FixtureLabel;
-		} catch (e) {
-			console.error(
-				`[eval] Skipping fixture "${name}": failed to load pair:`,
-				e,
-			);
-			continue;
-		}
-		fixtures.push({ name, diff, label });
-	}
-	return fixtures;
-}
-
-function readRuns(): number {
-	const raw = process.env.EVAL_RUNS;
-	if (!raw) return 5;
-	const n = Number(raw);
-	if (!Number.isFinite(n) || n < 1) {
-		console.warn(`[eval] EVAL_RUNS="${raw}" is invalid; defaulting to 5.`);
-		return 5;
-	}
-	return Math.floor(n);
-}
 
 function pad(s: string, width: number): string {
 	return s.length >= width ? s : s + " ".repeat(width - s.length);
@@ -119,7 +66,7 @@ async function main(): Promise<void> {
 	const fixtures = loadFixtures();
 
 	if (fixtures.length === 0) {
-		console.error(`[eval] No fixtures found in ${FIXTURES_DIR}.`);
+		console.error(`[eval] No fixtures found in eval/fixtures.`);
 		process.exit(1);
 	}
 
