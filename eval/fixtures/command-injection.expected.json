@@ -1,0 +1,9 @@
+{
+	"class": "should_flag",
+	"description": "Concatenates untrusted req.query.path into a shell command passed to exec() — command injection. Must be flagged as a security issue.",
+	"expect": {
+		"flagged": true,
+		"minSeverity": "high",
+		"categoryHint": "security"
+	}
+}

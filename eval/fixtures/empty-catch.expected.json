@@ -1,0 +1,9 @@
+{
+	"class": "should_flag",
+	"description": "Adds a truly empty catch block (catch (e) {}) that silently swallows the error — banned by the error-handling rule. Must be flagged.",
+	"expect": {
+		"flagged": true,
+		"minSeverity": "medium",
+		"categoryHint": "error"
+	}
+}

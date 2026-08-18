@@ -1,0 +1,5 @@
+{
+	"class": "should_not_flag",
+	"description": "Adds a test asserting parse(\"\") throws, using expect(...).toThrow() in a *.test.ts file. The throw is the intended, asserted behavior — not an error-handling defect.",
+	"expect": { "flagged": false }
+}

@@ -1,0 +1,11 @@
+diff --git a/app/proxy.py b/app/proxy.py
+index 1122334..5566778 100644
+--- a/app/proxy.py
++++ b/app/proxy.py
+@@ -6,6 +6,7 @@ import requests
+
+ def fetch_remote():
++    resp = requests.get(request.args["url"])
+     return resp.text
+
+

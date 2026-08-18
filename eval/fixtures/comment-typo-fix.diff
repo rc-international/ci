@@ -1,0 +1,11 @@
+diff --git a/src/parser.ts b/src/parser.ts
+index 11aa22b..33cc44d 100644
+--- a/src/parser.ts
++++ b/src/parser.ts
+@@ -10,7 +10,7 @@ export function parse(input: string): Token[] {
+ 	const tokens: Token[] = [];
+-	// Iterate over each charcter in the input string.
++	// Iterate over each character in the input string.
+ 	for (const ch of input) {
+ 		tokens.push(tokenize(ch));
+ 	}

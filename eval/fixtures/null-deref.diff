@@ -1,0 +1,14 @@
+diff --git a/app/account.py b/app/account.py
+index 3344556..7788990 100644
+--- a/app/account.py
++++ b/app/account.py
+@@ -12,7 +12,11 @@ def contact_email(user_id):
+     user = lookup(user_id)
+     if user is None:
++        user = None
++        log.info("no user found for %s", user_id)
++
++    return user.profile.email
+
+
+ def other():

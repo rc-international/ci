@@ -1,0 +1,9 @@
+{
+	"class": "should_flag",
+	"description": "Opens a file whose path is built from user-controlled request.args[\"filename\"] joined onto BASE_DIR with no sanitization — a \"../../\" filename escapes the base directory. Path traversal (CWE-22). Must be flagged as a security issue.",
+	"expect": {
+		"flagged": true,
+		"minSeverity": "high",
+		"categoryHint": "security"
+	}
+}

@@ -1,0 +1,13 @@
+diff --git a/app/loader.py b/app/loader.py
+index 4455667..8899001 100644
+--- a/app/loader.py
++++ b/app/loader.py
+@@ -8,6 +8,9 @@ def load_config(path):
+
+ def load_data(path):
++    f = open(path)
++    data = f.read()
++    return parse(data)
+
+
+ def helper():

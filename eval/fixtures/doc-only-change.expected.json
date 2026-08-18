@@ -1,0 +1,5 @@
+{
+	"class": "should_not_flag",
+	"description": "Expands a function docstring only; no logic, control-flow, or signature lines change. Pure documentation edit with no behavior change — nothing to flag.",
+	"expect": { "flagged": false }
+}

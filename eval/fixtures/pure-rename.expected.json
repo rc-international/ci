@@ -1,0 +1,5 @@
+{
+	"class": "should_not_flag",
+	"description": "Renames a local variable res → response across three lines with no behavior change. Purely cosmetic; nothing to flag.",
+	"expect": { "flagged": false }
+}

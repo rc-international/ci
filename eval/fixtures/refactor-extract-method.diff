@@ -1,0 +1,17 @@
+diff --git a/app/report.py b/app/report.py
+index 8899001..ccddee0 100644
+--- a/app/report.py
++++ b/app/report.py
+@@ -2,10 +2,13 @@ def build_report(items):
+     total = 0
+-    for item in items:
+-        total += item.price * item.qty
++    total = _sum_line_items(items)
+     return {"total": total}
+
+
++def _sum_line_items(items):
++    total = 0
++    for item in items:
++        total += item.price * item.qty
++    return total

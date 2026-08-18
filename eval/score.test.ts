@@ -1,0 +1,210 @@
+import { describe, expect, test } from "bun:test";
+import type { ReviewFinding } from "../scripts/lib/review-prompt.js";
+import {
+	aggregate,
+	type FixtureLabel,
+	type FixtureRun,
+	type FixtureScore,
+	isBlocking,
+	scoreFixture,
+} from "./score.js";
+
+// ── Test helpers ────────────────────────────────────────────────────────────
+
+function finding(
+	severity: ReviewFinding["severity"],
+	category = "logic",
+): ReviewFinding {
+	return {
+		file: "src/foo.ts",
+		severity,
+		category,
+		description: "synthetic finding",
+		suggested_fix: "fix it",
+		line_range: "1-2",
+	};
+}
+
+const shouldNotFlag: FixtureLabel = {
+	class: "should_not_flag",
+	description: "console carve-out",
+	expect: { flagged: false },
+};
+
+function shouldFlag(
+	minSeverity: "critical" | "high" | "medium",
+	categoryHint?: string,
+): FixtureLabel {
+	return {
+		class: "should_flag",
+		description: "must be caught",
+		expect: { flagged: true, minSeverity, categoryHint },
+	};
+}
+
+// ── isBlocking ──────────────────────────────────────────────────────────────
+
+describe("isBlocking", () => {
+	test("high and critical block; medium/low/needs-verification do not", () => {
+		expect(isBlocking(finding("critical"))).toBe(true);
+		expect(isBlocking(finding("high"))).toBe(true);
+		expect(isBlocking(finding("medium"))).toBe(false);
+		expect(isBlocking(finding("low"))).toBe(false);
+		expect(isBlocking(finding("needs-verification"))).toBe(false);
+	});
+});
+
+// ── scoreFixture: should_not_flag ─────────────────────────────────────────────
+
+describe("scoreFixture — should_not_flag", () => {
+	test("a high finding is a false positive → fail", () => {
+		const s = scoreFixture(shouldNotFlag, [finding("high")]);
+		expect(s.pass).toBe(false);
+		expect(s.blockingFindings).toBe(1);
+	});
+
+	test("a critical finding is a false positive → fail", () => {
+		const s = scoreFixture(shouldNotFlag, [finding("critical")]);
+		expect(s.pass).toBe(false);
+		expect(s.blockingFindings).toBe(1);
+	});
+
+	test("clean (no findings) → pass", () => {
+		const s = scoreFixture(shouldNotFlag, []);
+		expect(s.pass).toBe(true);
+		expect(s.blockingFindings).toBe(0);
+	});
+
+	test("only non-blocking findings (medium/low) → pass", () => {
+		const s = scoreFixture(shouldNotFlag, [
+			finding("medium"),
+			finding("low"),
+			finding("needs-verification"),
+		]);
+		expect(s.pass).toBe(true);
+		expect(s.blockingFindings).toBe(0);
+	});
+});
+
+// ── scoreFixture: should_flag ─────────────────────────────────────────────────
+
+describe("scoreFixture — should_flag", () => {
+	test("caught at exactly minSeverity → pass", () => {
+		const s = scoreFixture(shouldFlag("high"), [finding("high")]);
+		expect(s.pass).toBe(true);
+	});
+
+	test("caught above minSeverity → pass", () => {
+		const s = scoreFixture(shouldFlag("medium"), [finding("critical")]);
+		expect(s.pass).toBe(true);
+	});
+
+	test("caught below minSeverity → fail", () => {
+		const s = scoreFixture(shouldFlag("high"), [finding("medium")]);
+		expect(s.pass).toBe(false);
+	});
+
+	test("empty findings → fail", () => {
+		const s = scoreFixture(shouldFlag("medium"), []);
+		expect(s.pass).toBe(false);
+	});
+
+	test("needs-verification does not satisfy a medium threshold → fail", () => {
+		const s = scoreFixture(shouldFlag("medium"), [
+			finding("needs-verification"),
+		]);
+		expect(s.pass).toBe(false);
+	});
+});
+
+// ── categoryHint is soft ──────────────────────────────────────────────────────
+
+describe("scoreFixture — categoryHint is a soft signal", () => {
+	test("category substring match is recorded but not required for pass", () => {
+		// Right severity, WRONG category → still passes; matchedCategory false.
+		const wrongCat = scoreFixture(shouldFlag("high", "security"), [
+			finding("high", "performance"),
+		]);
+		expect(wrongCat.pass).toBe(true);
+		expect(wrongCat.matchedCategory).toBe(false);
+
+		// Right severity, matching category substring → passes; matchedCategory true.
+		const rightCat = scoreFixture(shouldFlag("high", "security"), [
+			finding("high", "security-injection"),
+		]);
+		expect(rightCat.pass).toBe(true);
+		expect(rightCat.matchedCategory).toBe(true);
+	});
+
+	test("matchedCategory is false when no hint is given", () => {
+		const s = scoreFixture(shouldFlag("high"), [finding("high", "security")]);
+		expect(s.matchedCategory).toBe(false);
+	});
+});
+
+// ── aggregate ─────────────────────────────────────────────────────────────────
+
+function run(name: string, label: FixtureLabel, passes: boolean[]): FixtureRun {
+	const scores: FixtureScore[] = passes.map((p) => ({
+		pass: p,
+		blockingFindings: p ? 0 : 1,
+		matchedCategory: false,
+	}));
+	return { name, label, scores };
+}
+
+describe("aggregate", () => {
+	test("false-positive rate over should_not_flag fixtures", () => {
+		// fixture A: 3/5 runs failed (blocking → FP). fixture B: 0/5 failed.
+		const runs: FixtureRun[] = [
+			run("A", shouldNotFlag, [true, false, false, false, true]),
+			run("B", shouldNotFlag, [true, true, true, true, true]),
+		];
+		const s = aggregate(runs);
+		// 3 FP over 10 should_not_flag fixture-runs.
+		expect(s.falsePositiveRate).toBeCloseTo(3 / 10);
+		expect(s.recall).toBe(0); // no should_flag fixtures present
+	});
+
+	test("recall over should_flag fixtures", () => {
+		const runs: FixtureRun[] = [
+			run("C", shouldFlag("high"), [true, true, false, true, false]),
+		];
+		const s = aggregate(runs);
+		// 3 caught over 5 should_flag runs.
+		expect(s.recall).toBeCloseTo(3 / 5);
+		expect(s.falsePositiveRate).toBe(0);
+	});
+
+	test("per-fixture verdict consistency = majority fraction", () => {
+		const runs: FixtureRun[] = [
+			// 4 pass / 1 fail → majority 4/5 = 0.8
+			run("flip", shouldFlag("high"), [true, true, true, true, false]),
+			// perfectly consistent → 1.0
+			run("stable", shouldNotFlag, [true, true, true]),
+		];
+		const s = aggregate(runs);
+		const flip = s.perFixture.find((f) => f.name === "flip");
+		const stable = s.perFixture.find((f) => f.name === "stable");
+		expect(flip?.consistency).toBeCloseTo(0.8);
+		expect(stable?.consistency).toBe(1);
+		expect(s.meanConsistency).toBeCloseTo((0.8 + 1) / 2);
+	});
+
+	test("passRate is computed per fixture", () => {
+		const runs: FixtureRun[] = [
+			run("half", shouldFlag("high"), [true, false, true, false]),
+		];
+		const s = aggregate(runs);
+		expect(s.perFixture[0]?.passRate).toBeCloseTo(0.5);
+		expect(s.perFixture[0]?.runs).toBe(4);
+	});
+
+	test("empty input is well-defined", () => {
+		const s = aggregate([]);
+		expect(s.falsePositiveRate).toBe(0);
+		expect(s.recall).toBe(0);
+		expect(s.meanConsistency).toBe(1);
+		expect(s.perFixture).toEqual([]);
+	});
+});

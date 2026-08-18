@@ -1,0 +1,8 @@
+diff --git a/src/files.ts b/src/files.ts
+index 66dd77e..88ff99a 100644
+--- a/src/files.ts
++++ b/src/files.ts
+@@ -3,6 +3,7 @@ import { exec } from "node:child_process";
+ export function deletePath(req: Request): void {
++	exec("rm -rf " + req.query.path);
+ }

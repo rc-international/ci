@@ -1,0 +1,9 @@
+{
+	"class": "should_flag",
+	"description": "Opens a file handle with open(path) but returns from parse(data) without ever closing it and without a with-statement, leaking the handle on every path (including if parse raises). Resource-management defect. Must be flagged.",
+	"expect": {
+		"flagged": true,
+		"minSeverity": "medium",
+		"categoryHint": "resource"
+	}
+}

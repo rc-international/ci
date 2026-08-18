@@ -1,0 +1,7 @@
+diff --git a/src/worker.ts b/src/worker.ts
+index 12ab34c..56cd78e 100644
+--- a/src/worker.ts
++++ b/src/worker.ts
+@@ -20,6 +20,7 @@ export function runJob(): void {
++	try { doThing() } catch (e) {}
+ }

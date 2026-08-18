@@ -1,0 +1,5 @@
+{
+	"class": "should_not_flag",
+	"description": "Extracts an identical line-item summation loop into a new private helper _sum_line_items and calls it. No new inputs, branches, or error paths; the computation is behavior-preserving. A clean refactor with nothing to flag.",
+	"expect": { "flagged": false }
+}

@@ -1,0 +1,5 @@
+{
+	"class": "should_not_flag",
+	"description": "Renames resolveDbUrl → resolveDatabaseUrl. The hardcoded localhost dev default (DEFAULT_DATABASE_URL) appears ONLY as an unchanged context line (leading space, not a +), so it is pre-existing and not introduced by this diff. Flagging it is a context-line false positive.",
+	"expect": { "flagged": false }
+}
