@@ -14,12 +14,29 @@ on:
     types: [opened, synchronize, reopened]
   pull_request_target:
     types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created]
 
 jobs:
   review:
     if: github.event_name == 'pull_request'
     uses: ./.github/workflows/code-review.yml
     secrets: inherit
+  # Manual `approved`-comment fallback. On an issue_comment event ci-review.ts
+  # runs ONLY the manual-approve check (it exits before any diff/API review), so
+  # no paid review is spent here — the phrase match happens in ci-review.ts. We
+  # only guard that the comment is on a PR (not a plain issue) before forwarding.
+  approve-comment:
+    if: ${{ github.event_name == 'issue_comment' && github.event.issue.pull_request }}
+    uses: ./.github/workflows/code-review.yml
+    secrets: inherit
+    with:
+      github_event_name: ${{ github.event_name }}
+      comment_body: ${{ github.event.comment.body }}
+      comment_author: ${{ github.event.comment.user.login }}
+      comment_author_association: ${{ github.event.comment.author_association }}
+      comment_is_pr: ${{ 'true' }}
+      pr_number: ${{ github.event.issue.number }}
   dependabot-approve:
     if: github.event_name == 'pull_request_target' && github.event.pull_request.user.login == 'dependabot[bot]'
     uses: ./.github/workflows/dependabot-approve.yml
