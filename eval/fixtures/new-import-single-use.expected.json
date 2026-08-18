@@ -1,0 +1,5 @@
+{
+  "class": "should_not_flag",
+  "description": "Adds a single new import `from website_expert.i18n import t`, uses `t(...)` in build_intro, and adds a parametrized unit test in the same diff so the coverage rule is satisfied. There is exactly one import of `t`; the call site is a use, not a second import. A reviewer that claims this is a duplicate import (as happened on website-expert#121) is producing a false positive, especially when only the diff — not the full file — is in context.",
+  "expect": { "flagged": false }
+}

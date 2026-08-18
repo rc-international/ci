@@ -1,0 +1,5 @@
+{
+  "class": "should_not_flag",
+  "description": "Introduces _CANONICAL_ORDER, _CANONICAL_RANK, _SINGLETON_TYPES, and insert_in_canonical_order exactly once each, WITH unit tests in the same diff so the coverage rule is satisfied. _CANONICAL_RANK is a comprehension over _CANONICAL_ORDER and the helper references all three constants, but those are USES, not redefinitions. A reviewer that flags these as duplicate definitions (as happened on website-expert#121) is producing a false positive.",
+  "expect": { "flagged": false }
+}
