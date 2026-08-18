@@ -1,0 +1,81 @@
+diff --git a/src/website_expert/tools/add_block.py b/src/website_expert/tools/add_block.py
+index 8828514..9d66535 100644
+--- a/src/website_expert/tools/add_block.py
++++ b/src/website_expert/tools/add_block.py
+@@ -36,6 +36,42 @@ from website_expert.schemas import Block
+
+ log = get_logger(__name__)
+
++# Canonical top-to-bottom ordering blocks appear in on a published page.
++_CANONICAL_ORDER = (
++    "hero",
++    "about",
++    "menu",
++    "hours",
++    "gallery",
++    "reviews",
++    "contact",
++    "footer",
++)
++
++# Rank lookup derived from the canonical order; lower rank sorts higher.
++_CANONICAL_RANK = {name: i for i, name in enumerate(_CANONICAL_ORDER)}
++
++# Block types that may appear at most once per page.
++_SINGLETON_TYPES = frozenset({"hero", "hours", "footer"})
++
++
++def insert_in_canonical_order(blocks, new_block):
++    """Insert new_block so the list stays in canonical order."""
++    rank = _CANONICAL_RANK.get(new_block.type, len(_CANONICAL_ORDER))
++    if new_block.type in _SINGLETON_TYPES:
++        blocks = [b for b in blocks if b.type != new_block.type]
++    position = len(blocks)
++    for i, existing in enumerate(blocks):
++        existing_rank = _CANONICAL_RANK.get(existing.type, len(_CANONICAL_ORDER))
++        if existing_rank > rank:
++            position = i
++            break
++    blocks.insert(position, new_block)
++    return blocks
++
+
+ async def add_block(page, block):
+     log.info("adding block %s", block.type)
+diff --git a/tests/test_add_block.py b/tests/test_add_block.py
+new file mode 100644
+index 0000000..1a2b3c4
+--- /dev/null
++++ b/tests/test_add_block.py
+@@ -0,0 +1,34 @@
++from dataclasses import dataclass
++
++from website_expert.tools.add_block import insert_in_canonical_order
++
++
++@dataclass
++class _Block:
++    type: str
++
++
++def _types(blocks):
++    return [b.type for b in blocks]
++
++
++def test_inserts_in_canonical_order():
++    blocks = [_Block("hero"), _Block("menu"), _Block("footer")]
++    result = insert_in_canonical_order(blocks, _Block("hours"))
++    assert _types(result) == ["hero", "menu", "hours", "footer"]
++
++
++def test_singleton_type_replaces_existing():
++    blocks = [_Block("hero"), _Block("menu")]
++    result = insert_in_canonical_order(blocks, _Block("hero"))
++    assert _types(result) == ["hero", "menu"]
++    assert len([b for b in result if b.type == "hero"]) == 1
++
++
++def test_unknown_type_appended_last():
++    blocks = [_Block("hero"), _Block("footer")]
++    result = insert_in_canonical_order(blocks, _Block("mystery"))
++    assert _types(result)[-1] == "mystery"

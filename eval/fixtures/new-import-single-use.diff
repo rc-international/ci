@@ -1,0 +1,35 @@
+diff --git a/src/website_expert/agent.py b/src/website_expert/agent.py
+index 8828514..9d66535 100644
+--- a/src/website_expert/agent.py
++++ b/src/website_expert/agent.py
+@@ -24,6 +24,7 @@ from website_expert.config import settings
+ from website_expert.publisher import publish_card
+ from website_expert.schemas import Draft
++from website_expert.i18n import t
+
+ log = get_logger(__name__)
+
+@@ -61,7 +62,7 @@ def build_intro(country_code):
+-    return "Welcome!"
++    return t("intro.welcome", country_code)
+diff --git a/tests/test_agent.py b/tests/test_agent.py
+new file mode 100644
+index 0000000..2b3c4d5
+--- /dev/null
++++ b/tests/test_agent.py
+@@ -0,0 +1,17 @@
++import pytest
++
++from website_expert.agent import build_intro
++
++
++@pytest.mark.parametrize(
++    "country_code,expected",
++    [
++        ("BR", "Bem-vindo!"),
++        ("US", "Welcome!"),
++        ("FR", "Bienvenue!"),
++    ],
++)
++def test_build_intro_localizes_by_country(country_code, expected):
++    assert build_intro(country_code) == expected
