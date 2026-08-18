@@ -1,5 +1,5 @@
 {
 	"class": "should_flag",
 	"description": "Calls the promise-returning persistSession(data) without await inside an async function that returns immediately after, so the write may not complete (and rejections go unhandled). Must be flagged.",
-	"expect": { "flagged": true, "minSeverity": "medium" }
+	"expect": { "flagged": true, "minSeverity": "medium", "expectedSeverity": "medium" }
 }

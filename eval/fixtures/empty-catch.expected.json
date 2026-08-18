@@ -4,6 +4,7 @@
 	"expect": {
 		"flagged": true,
 		"minSeverity": "medium",
+		"expectedSeverity": "medium",
 		"categoryHint": "error"
 	}
 }

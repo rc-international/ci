@@ -4,6 +4,7 @@
 	"expect": {
 		"flagged": true,
 		"minSeverity": "high",
+		"expectedSeverity": "high",
 		"categoryHint": "security"
 	}
 }

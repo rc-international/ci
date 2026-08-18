@@ -32,6 +32,13 @@ export interface FixtureExpectation {
 	flagged: boolean;
 	minSeverity?: "critical" | "high" | "medium";
 	categoryHint?: string;
+	/**
+	 * Optional severity-calibration target for `should_flag` fixtures. When set,
+	 * a passing fixture's highest-severity blocking finding is compared against
+	 * this band to detect over/under-severity. Absent ⇒ calibration is skipped
+	 * and scoring is identical to before.
+	 */
+	expectedSeverity?: Severity;
 }
 
 export interface FixtureLabel {
@@ -44,6 +51,15 @@ export interface FixtureScore {
 	pass: boolean;
 	blockingFindings: number;
 	matchedCategory: boolean;
+	/**
+	 * Signed rank(actualTopSeverity) - rank(expectedSeverity) for a passing
+	 * `should_flag` fixture that declares `expectedSeverity`. Positive = the bot
+	 * was over-severe, negative = under-severe, 0 = exact. `undefined` when
+	 * `expectedSeverity` is unset or the fixture didn't pass.
+	 */
+	severityDelta?: number;
+	/** `severityDelta === 0`. `undefined` under the same conditions as above. */
+	severityMatch?: boolean;
 }
 
 // ── Severity ordering ─────────────────────────────────────────────────────────
@@ -102,7 +118,29 @@ export function scoreFixture(
 		pass = findings.some((f) => severityRank(f.severity) >= min);
 	}
 
-	return { pass, blockingFindings, matchedCategory };
+	const score: FixtureScore = { pass, blockingFindings, matchedCategory };
+
+	// Severity calibration: only for a passing should_flag fixture that declares
+	// an expectedSeverity. Compare the highest-severity BLOCKING finding against
+	// the expected band. Leave the fields undefined otherwise (don't fabricate).
+	// KNOWN LIMITATION: calibration is measured only against the top BLOCKING
+	// finding, so a fixture whose minSeverity < expectedSeverity, where the bot
+	// rates the issue between the two (below blocking rank), passes recall but
+	// records NO under-severe delta. Current fixtures don't hit this because
+	// minSeverity aligns with expectedSeverity.
+	const expectedSeverity = label.expect.expectedSeverity;
+	if (label.class === "should_flag" && pass && expectedSeverity) {
+		const topBlockingRank = findings
+			.filter(isBlocking)
+			.reduce((max, f) => Math.max(max, severityRank(f.severity)), -1);
+		if (topBlockingRank >= 0) {
+			const delta = topBlockingRank - severityRank(expectedSeverity);
+			score.severityDelta = delta;
+			score.severityMatch = delta === 0;
+		}
+	}
+
+	return score;
 }
 
 // ── Aggregation ────────────────────────────────────────────────────────────────
@@ -129,6 +167,17 @@ export interface FixtureAggregate {
 	runs: number;
 }
 
+export interface SeverityCalibration {
+	/** Fraction of evaluated calibration points where severity matched exactly. */
+	exactRate: number;
+	/** Count of evaluated points where the bot was over-severe (delta > 0). */
+	overSevereCount: number;
+	/** Count of evaluated points where the bot was under-severe (delta < 0). */
+	underSevereCount: number;
+	/** Number of should_flag fixture-runs that had a defined severityDelta. */
+	evaluated: number;
+}
+
 export interface AggregateSummary {
 	/** False-positive rate over `should_not_flag` fixtures: fraction of those
 	 *  fixture-runs that (wrongly) produced a blocking finding. */
@@ -138,6 +187,12 @@ export interface AggregateSummary {
 	recall: number;
 	/** Mean per-fixture verdict consistency across all fixtures. */
 	meanConsistency: number;
+	/**
+	 * Severity calibration over should_flag fixture-runs that declared
+	 * `expectedSeverity` and passed (i.e. have a defined `severityDelta`).
+	 * Fixtures without `expectedSeverity` are excluded from the denominator.
+	 */
+	severityCalibration: SeverityCalibration;
 	perFixture: FixtureAggregate[];
 }
 
@@ -174,6 +229,11 @@ export function aggregate(runs: FixtureRun[]): AggregateSummary {
 	// Recall: over should_flag fixture-runs, the share that passed (caught it).
 	let recallPass = 0;
 	let recallTotal = 0;
+	// Severity calibration: over should_flag fixture-runs with a defined delta.
+	let calEvaluated = 0;
+	let calExact = 0;
+	let calOver = 0;
+	let calUnder = 0;
 
 	for (const r of runs) {
 		for (const s of r.scores) {
@@ -183,6 +243,12 @@ export function aggregate(runs: FixtureRun[]): AggregateSummary {
 			} else {
 				recallTotal += 1;
 				if (s.pass) recallPass += 1;
+				if (s.severityDelta !== undefined) {
+					calEvaluated += 1;
+					if (s.severityDelta === 0) calExact += 1;
+					else if (s.severityDelta > 0) calOver += 1;
+					else calUnder += 1;
+				}
 			}
 		}
 	}
@@ -197,6 +263,12 @@ export function aggregate(runs: FixtureRun[]): AggregateSummary {
 		falsePositiveRate: fpTotal === 0 ? 0 : fpFail / fpTotal,
 		recall: recallTotal === 0 ? 0 : recallPass / recallTotal,
 		meanConsistency,
+		severityCalibration: {
+			exactRate: calEvaluated === 0 ? 0 : calExact / calEvaluated,
+			overSevereCount: calOver,
+			underSevereCount: calUnder,
+			evaluated: calEvaluated,
+		},
 		perFixture,
 	};
 }

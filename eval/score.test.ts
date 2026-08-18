@@ -42,6 +42,17 @@ function shouldFlag(
 	};
 }
 
+function shouldFlagCalibrated(
+	minSeverity: "critical" | "high" | "medium",
+	expectedSeverity: ReviewFinding["severity"],
+): FixtureLabel {
+	return {
+		class: "should_flag",
+		description: "must be caught with a calibrated severity",
+		expect: { flagged: true, minSeverity, expectedSeverity },
+	};
+}
+
 // ── isBlocking ──────────────────────────────────────────────────────────────
 
 describe("isBlocking", () => {
@@ -142,6 +153,65 @@ describe("scoreFixture — categoryHint is a soft signal", () => {
 	});
 });
 
+// ── scoreFixture: severity calibration ────────────────────────────────────────
+
+describe("scoreFixture — severity calibration", () => {
+	test("exact match: bot returns expected severity → delta 0, match true", () => {
+		const s = scoreFixture(shouldFlagCalibrated("high", "high"), [
+			finding("high"),
+		]);
+		expect(s.pass).toBe(true);
+		expect(s.severityDelta).toBe(0);
+		expect(s.severityMatch).toBe(true);
+	});
+
+	test("over-severe: bot returns critical when expected high → delta +1", () => {
+		const s = scoreFixture(shouldFlagCalibrated("high", "high"), [
+			finding("critical"),
+		]);
+		expect(s.pass).toBe(true);
+		expect(s.severityDelta).toBe(1);
+		expect(s.severityMatch).toBe(false);
+	});
+
+	test("under-severe: bot's top blocking is high when expected critical → delta -1", () => {
+		// expected critical, bot's highest BLOCKING finding is high (rank 3 - 4 = -1).
+		const s = scoreFixture(shouldFlagCalibrated("high", "critical"), [
+			finding("high"),
+		]);
+		expect(s.pass).toBe(true);
+		expect(s.severityDelta).toBe(-1);
+		expect(s.severityMatch).toBe(false);
+	});
+
+	test("highest-severity blocking finding is used when several are present", () => {
+		const s = scoreFixture(shouldFlagCalibrated("high", "high"), [
+			finding("high"),
+			finding("critical"),
+			finding("medium"),
+		]);
+		expect(s.severityDelta).toBe(1); // critical (4) - high (3)
+		expect(s.severityMatch).toBe(false);
+	});
+
+	test("expectedSeverity unset: calibration fields stay undefined, pass unchanged", () => {
+		const s = scoreFixture(shouldFlag("high"), [finding("high")]);
+		expect(s.pass).toBe(true);
+		expect(s.severityDelta).toBeUndefined();
+		expect(s.severityMatch).toBeUndefined();
+	});
+
+	test("did-not-pass should_flag with expectedSeverity: no calibration recorded", () => {
+		// Only a medium finding, minSeverity high → fails; calibration must not fire.
+		const s = scoreFixture(shouldFlagCalibrated("high", "high"), [
+			finding("medium"),
+		]);
+		expect(s.pass).toBe(false);
+		expect(s.severityDelta).toBeUndefined();
+		expect(s.severityMatch).toBeUndefined();
+	});
+});
+
 // ── aggregate ─────────────────────────────────────────────────────────────────
 
 function run(name: string, label: FixtureLabel, passes: boolean[]): FixtureRun {
@@ -206,5 +276,45 @@ describe("aggregate", () => {
 		expect(s.recall).toBe(0);
 		expect(s.meanConsistency).toBe(1);
 		expect(s.perFixture).toEqual([]);
+		expect(s.severityCalibration).toEqual({
+			exactRate: 0,
+			overSevereCount: 0,
+			underSevereCount: 0,
+			evaluated: 0,
+		});
+	});
+
+	test("severityCalibration summarizes defined deltas; ignores undefined", () => {
+		const calScore = (
+			pass: boolean,
+			severityDelta?: number,
+		): FixtureScore => ({
+			pass,
+			blockingFindings: pass ? 1 : 0,
+			matchedCategory: false,
+			...(severityDelta === undefined
+				? {}
+				: { severityDelta, severityMatch: severityDelta === 0 }),
+		});
+
+		const runs: FixtureRun[] = [
+			// exact, over, under → 1 exact of 3 evaluated.
+			{
+				name: "cal",
+				label: shouldFlagCalibrated("high", "high"),
+				scores: [calScore(true, 0), calScore(true, 1), calScore(true, -1)],
+			},
+			// should_flag WITHOUT expectedSeverity → deltas undefined, excluded.
+			{
+				name: "no-cal",
+				label: shouldFlag("high"),
+				scores: [calScore(true), calScore(true)],
+			},
+		];
+		const s = aggregate(runs);
+		expect(s.severityCalibration.evaluated).toBe(3);
+		expect(s.severityCalibration.exactRate).toBeCloseTo(1 / 3);
+		expect(s.severityCalibration.overSevereCount).toBe(1);
+		expect(s.severityCalibration.underSevereCount).toBe(1);
 	});
 });
