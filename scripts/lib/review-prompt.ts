@@ -138,7 +138,20 @@ Evaluate the diff against the rules below. For ANY real violation visible in the
 
 15. English-only string sets in a multilingual codebase. CRITICAL when: a whitelist, category list, keyword filter, allowlist, or any hardcoded string set used to match/gate/route data is English-only while the code processes multilingual data (e.g. a fleet whose sources return Portuguese/Spanish). An English-only match silently drops non-English records — this is data loss, not a missed feature — so verify locale coverage of every hardcoded string set.
 
-16. Unbounded logs. HIGH when: a new or modified app, service, script, cron job, or container writes a log with no size bound or rotation — no logrotate stanza (\`copytruncate\` for a writer that holds the fd open, \`create\` for one that reopens per run), no docker \`log-opts\` \`max-size\`/\`max-file\`, no journald \`SystemMaxUse\`, or a home-grown rotation that a short-lived / cron process never fires. Every log must have a size cap and retention.`;
+16. Unbounded logs. HIGH when: a new or modified app, service, script, cron job, or container writes a log with no size bound or rotation — no logrotate stanza (\`copytruncate\` for a writer that holds the fd open, \`create\` for one that reopens per run), no docker \`log-opts\` \`max-size\`/\`max-file\`, no journald \`SystemMaxUse\`, or a home-grown rotation that a short-lived / cron process never fires. Every log must have a size cap and retention.
+
+17. Severity calibration. Assign the band that matches the ACTUAL impact of the changed lines:
+- critical: an exploitable security vulnerability, data loss/corruption, or a guaranteed crash / broken build on the primary path.
+- high: a likely-exploitable security issue; a correctness bug that yields wrong output; an unhandled failure on a common path; OR a coverage gap (see rule 18).
+- medium: a correctness issue on an edge case, a resource leak, missing error handling on a non-critical path, a performance concern.
+- low: style, naming, minor maintainability, docs.
+Do not inflate severity to force attention, and do not deflate a real security, correctness, or coverage issue. Pick the band that matches actual impact.
+
+18. Coverage carve-out (mandatory, non-negotiable — overrides rule 17's "don't inflate"). Missing or inadequate unit tests for substantial new logic are ALWAYS at least \`high\` and therefore blocking — including for scripts, tooling, and CI/eval code — because some repositories auto-merge on green CI with no human review gate. Never downgrade a genuine coverage gap below \`high\`, and never render it as a non-blocking note.
+
+19. Context accuracy. Be precise about what is and isn't covered. If related logic is already tested in a sibling file present in the diff, acknowledge it and flag only the specific untested surface — do not claim "no tests exist" when some do.
+
+20. Remediation quality. Only propose a fix that is specific to the code under review and that you have reasoned is genuinely valuable. Do not emit a generic remediation (e.g. "add tests", "mock the API") without naming the concrete behavior that must be covered and why. If you cannot identify a valuable, concrete fix, describe the gap and its risk instead of prescribing a hollow one.`;
 
 /**
  * Standardized output schema description for all diff review prompts.
@@ -204,6 +217,11 @@ Scope every finding to the changes in this diff. Only report a problem if the of
 - Errors swallowed without any logging (at minimum console.debug)
 - Missing error context: catch logs a generic message without the error object
 
+### Test coverage and context
+- Coverage carve-out (mandatory, non-negotiable): missing or inadequate unit tests for substantial new logic are ALWAYS at least \`high\` and therefore blocking — including for scripts, tooling, and CI/eval code — because some repositories auto-merge on green CI with no human review gate. Never downgrade a genuine coverage gap below \`high\`, and never render it as a non-blocking note.
+- Context accuracy: be precise about what is and isn't covered. If related logic is already tested in a sibling file present in the diff, acknowledge it and flag only the specific untested surface — do not claim "no tests exist" when some do.
+- Remediation quality: only propose a fix that is specific to the code under review and that you have reasoned is genuinely valuable. Do not emit a generic remediation (e.g. "add tests", "mock the API") without naming the concrete behavior that must be covered and why. If you cannot identify a valuable, concrete fix, describe the gap and its risk instead of prescribing a hollow one.
+
 ${PR_STRUCTURE_RULE}
 
 ${ENGINEERING_RULES}
@@ -226,6 +244,13 @@ ${ENGINEERING_RULES}
 ## Output format
 
 ${REVIEW_OUTPUT_SCHEMA}
+
+Severity calibration — pick the band that matches the ACTUAL impact of the changed lines:
+- critical: an exploitable security vulnerability, data loss/corruption, or a guaranteed crash / broken build on the primary path
+- high: a likely-exploitable security issue; a correctness bug that yields wrong output; an unhandled failure on a common path; OR a coverage gap (see the coverage carve-out above)
+- medium: a correctness issue on an edge case, a resource leak, missing error handling on a non-critical path, a performance concern
+- low: style, naming, minor maintainability, docs
+Do not inflate severity to force attention, and do not deflate a real security, correctness, or coverage issue. Pick the band that matches actual impact.
 
 Severity guide:
 - critical: credential exposure, SQL injection, auth bypass, data loss risk
