@@ -104,6 +104,8 @@ The finding's \`file\` field for these checks is the literal string \`PR_BODY\` 
  */
 export const ENGINEERING_RULES = `### Engineering rules (mandatory — flag violations as HIGH)
 
+Diff scope: only flag code on ADDED lines (lines beginning with \`+\`, excluding the \`+++\` file header). Do NOT flag issues visible only on context lines (single leading space) or removed lines (\`-\`) — those are pre-existing or being deleted and are out of scope. If a pre-existing issue appears only in surrounding context, ignore it.
+
 Evaluate the diff against the rules below. For ANY real violation visible in the diff, emit a finding with severity "high" (or "critical" for an issue that can take down a shared service or cause data loss) citing the exact file and line — a HIGH finding triggers REQUEST_CHANGES and blocks the merge until fixed. These encode the team's most frequently-repeated review findings. IMPORTANT: only flag what the changed lines actually show; do not invent violations or flag a rule that does not apply to this diff.
 
 1. Unverified assumptions. HIGH when: code, comments, log lines, or messages assert a fact or number with no basis (e.g. throughput like "235 records/hour", "this is correct", "the migration is broken") as if verified; or a calculation uses unverified inputs but is stated as a precise result instead of an estimate.
@@ -114,7 +116,7 @@ Evaluate the diff against the rules below. For ANY real violation visible in the
 
 4. Hardcoded environment-specific values. HIGH when: a hardcoded user-specific path (\`/home/<name>/...\`), IP address, port, channel/ID, or secret/token appears in source; or a magic number is used in non-trivial logic instead of a named constant.
 
-5. Security. HIGH when: TLS/host verification is disabled (\`NODE_TLS_REJECT_UNAUTHORIZED = '0'\`, \`verify=False\`, \`StrictHostKeyChecking=accept-new\`); SQL is built by string concatenation / f-string instead of a parameterized query; a new HTTP route/handler has no auth check; or credentials are read from an insecure location.
+5. Security. HIGH when: TLS/host verification is disabled (\`NODE_TLS_REJECT_UNAUTHORIZED = '0'\`, \`verify=False\`, \`StrictHostKeyChecking=accept-new\`); SQL is built by string concatenation / f-string instead of a parameterized query; a new HTTP route/handler has no auth check; or credentials are read from an insecure location. Exception — test-fixture secrets: do NOT flag hardcoded credentials, passwords, API keys, or tokens that appear in test code or fixtures (files whose path contains \`test\`, \`tests\`, \`__tests__\`, \`spec\`, or \`fixtures\`, or values explicitly annotated as test-only) — these are intentional test data, not real secret leaks. Real credentials in non-test production source must still be flagged.
 
 6. Missing tests. HIGH when: a new script, module, or worker — or substantial new logic — is added with no corresponding test file or test case in the same diff.
 
@@ -171,6 +173,9 @@ export function loadReviewPatterns(yamlPath?: string): ReviewPatterns | null {
 
 export const FALLBACK_PROMPT = `You are a senior code reviewer. You will receive the full source files for context followed by the git diff to review. Use the full file context to understand the broader codebase patterns, existing error handling, and architecture before flagging issues in the diff.
 
+## Diff scope (highest priority — read before everything else)
+Scope every finding to the changes in this diff. Only report a problem if the offending code is on an ADDED line (a line beginning with \`+\` in the unified diff, excluding the \`+++\` file header). Do NOT flag issues that appear only on context lines (lines beginning with a single space) or removed lines (beginning with \`-\`) — that code is pre-existing or being deleted and is out of scope for this review. If a pre-existing issue is visible only in surrounding context, ignore it.
+
 ## Review rules (non-negotiable)
 - Do NOT skip review when issues are found — continue and report ALL findings
 - Do NOT make assumptions without evidence from the diff
@@ -187,7 +192,7 @@ export const FALLBACK_PROMPT = `You are a senior code reviewer. You will receive
 ## Critical patterns (always flag as critical or high)
 
 ### Security
-- Hardcoded credentials, API keys, passwords, or connection strings with auth info
+- Hardcoded credentials, API keys, passwords, or connection strings with auth info (exception: do NOT flag hardcoded credentials, passwords, API keys, or tokens in test code or fixtures — files whose path contains \`test\`, \`tests\`, \`__tests__\`, \`spec\`, or \`fixtures\`, or values explicitly annotated as test-only — these are intentional test data, not real secret leaks; real credentials in non-test production source must still be flagged)
 - SQL/command injection: string concatenation in queries instead of parameterized
 - Client-supplied userId/auth context trusted without server-side derivation
 - Missing auth checks on endpoints
