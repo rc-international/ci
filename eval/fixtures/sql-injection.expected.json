@@ -1,0 +1,9 @@
+{
+	"class": "should_flag",
+	"description": "Interpolates untrusted userId directly into a SQL string — classic SQL injection. Must be flagged as a security issue.",
+	"expect": {
+		"flagged": true,
+		"minSeverity": "high",
+		"categoryHint": "security"
+	}
+}

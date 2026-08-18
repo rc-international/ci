@@ -1,0 +1,5 @@
+{
+	"class": "should_not_flag",
+	"description": "Adds console.debug logging to a previously-empty catch block. Per the error-handling rule, console.* logging is the accepted carve-out that RESOLVES an empty catch — it is not a defect.",
+	"expect": { "flagged": false }
+}

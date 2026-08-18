@@ -1,0 +1,12 @@
+diff --git a/app/convert.py b/app/convert.py
+index 2233445..6677889 100644
+--- a/app/convert.py
++++ b/app/convert.py
+@@ -4,6 +4,8 @@ import subprocess
+
+ def convert_image():
++    filename = request.args["filename"]
++    subprocess.run(f"convert {filename} out.png", shell=True)
+     return "ok"
+
+

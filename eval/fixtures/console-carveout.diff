@@ -1,0 +1,11 @@
+diff --git a/src/session.ts b/src/session.ts
+index 1a2b3c4..5d6e7f8 100644
+--- a/src/session.ts
++++ b/src/session.ts
+@@ -40,6 +40,7 @@ export async function cleanupSession(sessionId: string): Promise<void> {
+ 	try {
+ 		await removeTempFiles(sessionId);
+ 	} catch (e) {
++		console.debug(`[${sessionId.slice(-8)}] cleanup failed:`, e);
+ 	}
+ }

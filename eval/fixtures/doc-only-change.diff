@@ -1,0 +1,12 @@
+diff --git a/app/service.py b/app/service.py
+index 6677889..aabbccd 100644
+--- a/app/service.py
++++ b/app/service.py
+@@ -1,7 +1,8 @@
+ def charge(amount):
+-    """Charge the customer."""
++    """Charge the customer the given amount in cents.
++
++    Returns the gateway transaction id on success.
++    """
+     return gateway.charge(amount)

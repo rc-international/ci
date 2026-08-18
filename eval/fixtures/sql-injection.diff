@@ -1,0 +1,9 @@
+diff --git a/src/users.ts b/src/users.ts
+index 22cc33d..44ee55f 100644
+--- a/src/users.ts
++++ b/src/users.ts
+@@ -8,6 +8,7 @@ export async function getUser(userId: string): Promise<User> {
+ 	const db = await getConnection();
++	const rows = await db.query(`SELECT * FROM users WHERE id = '${userId}'`);
++	return rows[0];
+ }

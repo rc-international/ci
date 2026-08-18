@@ -1,0 +1,5 @@
+{
+	"class": "should_not_flag",
+	"description": "Reorders three stdlib imports into alphabetical order (isort-style). Same imports, no semantic change. Pure formatting — nothing to flag.",
+	"expect": { "flagged": false }
+}

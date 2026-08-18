@@ -1,0 +1,5 @@
+{
+	"class": "should_not_flag",
+	"description": "Fixes a spelling typo (charcter → character) in a code comment. No behavior change; nothing to flag.",
+	"expect": { "flagged": false }
+}

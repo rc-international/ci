@@ -1,0 +1,9 @@
+{
+	"class": "should_flag",
+	"description": "Interpolates user-controlled filename into a shell command string run with shell=True — a filename like \"x; rm -rf /\" executes arbitrary commands. OS command injection (CWE-78). Must be flagged as a security issue.",
+	"expect": {
+		"flagged": true,
+		"minSeverity": "high",
+		"categoryHint": "security"
+	}
+}

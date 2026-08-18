@@ -1,0 +1,9 @@
+{
+	"class": "should_flag",
+	"description": "On the not-found branch user is set to None, then user.profile.email is dereferenced unconditionally after the branch — an AttributeError on None (null dereference, CWE-476). Both the assignment and the dereference are on added lines in the diff. Must be flagged.",
+	"expect": {
+		"flagged": true,
+		"minSeverity": "medium",
+		"categoryHint": "null"
+	}
+}

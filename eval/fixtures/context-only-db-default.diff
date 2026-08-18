@@ -1,0 +1,12 @@
+diff --git a/src/config.ts b/src/config.ts
+index aa11bb2..cc33dd4 100644
+--- a/src/config.ts
++++ b/src/config.ts
+@@ -3,8 +3,8 @@
+ const DEFAULT_DATABASE_URL = "postgresql://claude:claude_dev@localhost:5432/continuous_claude";
+ 
+-export function resolveDbUrl(envUrl: string | undefined): string {
+-	return envUrl ?? DEFAULT_DATABASE_URL;
++export function resolveDatabaseUrl(envUrl: string | undefined): string {
++	return envUrl ?? DEFAULT_DATABASE_URL;
+ }

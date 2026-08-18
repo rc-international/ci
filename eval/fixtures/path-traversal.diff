@@ -1,0 +1,11 @@
+diff --git a/app/files.py b/app/files.py
+index a1b2c3d..d4e5f6a 100644
+--- a/app/files.py
++++ b/app/files.py
+@@ -10,6 +10,7 @@ BASE_DIR = "/srv/app/uploads"
+
+ def read_upload():
++    return open(os.path.join(BASE_DIR, request.args["filename"]))
+
+
+ def list_uploads():

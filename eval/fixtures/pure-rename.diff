@@ -1,0 +1,12 @@
+diff --git a/src/fetch-user.ts b/src/fetch-user.ts
+index 55ee66f..77aa88b 100644
+--- a/src/fetch-user.ts
++++ b/src/fetch-user.ts
+@@ -5,9 +5,9 @@ export async function fetchUser(id: string): Promise<User> {
+-	const res = await api.get(`/users/${id}`);
+-	const user = res.data;
+-	return normalize(user);
++	const response = await api.get(`/users/${id}`);
++	const user = response.data;
++	return normalize(user);
+ }

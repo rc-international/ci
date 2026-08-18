@@ -1,0 +1,9 @@
+{
+	"class": "should_flag",
+	"description": "Issues an outbound HTTP request to a user-controlled URL from request.args[\"url\"] with no allowlist or scheme/host validation, letting a caller reach internal services (e.g. 169.254.169.254, localhost). Server-side request forgery (CWE-918). Must be flagged as a security issue.",
+	"expect": {
+		"flagged": true,
+		"minSeverity": "high",
+		"categoryHint": "security"
+	}
+}

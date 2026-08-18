@@ -1,0 +1,12 @@
+diff --git a/src/parser.test.ts b/src/parser.test.ts
+index 99bb00c..aabbccd 100644
+--- a/src/parser.test.ts
++++ b/src/parser.test.ts
+@@ -12,3 +12,7 @@ describe("parse", () => {
+ 		expect(parse("a")).toEqual([{ kind: "char", value: "a" }]);
+ 	});
++
++	test("throws on empty input", () => {
++		expect(() => parse("")).toThrow();
++	});
+ });
