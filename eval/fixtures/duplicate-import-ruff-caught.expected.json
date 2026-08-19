@@ -1,0 +1,5 @@
+{
+  "class": "should_not_flag",
+  "description": "Adds a genuinely duplicated `import os` (the added line 2 duplicates the pre-existing import on line 1) — a real ruff F811 redefinition that the CI lint gate catches and blocks on its own. The reviewer must NOT also block: per rule #8's duplicate-import exception, a duplicate-import finding is capped at MEDIUM (non-blocking). Tests are included so the coverage rule does not fire an unrelated HIGH. PASS iff the reviewer produces no high/critical finding — i.e. it defers the duplicate import to ruff.",
+  "expect": { "flagged": false }
+}
