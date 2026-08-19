@@ -1,0 +1,32 @@
+diff --git a/src/website_expert/greeting.py b/src/website_expert/greeting.py
+index 1111111..2222222 100644
+--- a/src/website_expert/greeting.py
++++ b/src/website_expert/greeting.py
+@@ -1,5 +1,9 @@
+ import os
++import os
+
+ from website_expert.i18n import t
+
++
++def greeting_prefix() -> str:
++    return os.environ.get("GREETING_PREFIX", "")
+diff --git a/tests/test_greeting.py b/tests/test_greeting.py
+new file mode 100644
+index 0000000..3333333
+--- /dev/null
++++ b/tests/test_greeting.py
+@@ -0,0 +1,12 @@
++import os
++
++from website_expert.greeting import greeting_prefix
++
++
++def test_greeting_prefix_default(monkeypatch):
++    monkeypatch.delenv("GREETING_PREFIX", raising=False)
++    assert greeting_prefix() == ""
++
++
++def test_greeting_prefix_set(monkeypatch):
++    monkeypatch.setenv("GREETING_PREFIX", ">> ")
++    assert greeting_prefix() == ">> "

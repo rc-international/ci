@@ -122,7 +122,7 @@ Evaluate the diff against the rules below. For ANY real violation visible in the
 
 7. Production-path changes without a verification story. HIGH when: the diff touches deploy scripts, systemd units, CI workflows, DB schemas/migrations, scheduled jobs, or multi-tenant infra AND the \`## PR Body\` lacks concrete \`## Operator Deploy Steps\` and \`## Expected Outcomes\` containing at least one runnable post-deploy smoke/health command.
 
-8. Dead, duplicated, or truncated code. HIGH when: a logic block is duplicated verbatim (DRY violation); a file ends mid-statement or mid-comment (truncated edit); or code is plainly unreachable.
+8. Dead, duplicated, or truncated code. HIGH when: a logic block is duplicated verbatim (DRY violation); a file ends mid-statement or mid-comment (truncated edit); or code is plainly unreachable. EXCEPTION — duplicate imports: cap any finding about a duplicated or re-declared import at MEDIUM (never HIGH). A genuine duplicate import is already caught deterministically by the ruff lint gate (F811, redefinition of unused name), which blocks the merge on its own — so the reviewer must not also block on it, and a mistaken duplicate-import claim must never block a merge.
 
 9. Bash set -e safety. HIGH when: in a script using \`set -e\` / \`set -euo pipefail\`, an optional command (a \`grep\` that may match nothing, an optional tool) is invoked without \`|| true\` or an \`if\` guard.
 
