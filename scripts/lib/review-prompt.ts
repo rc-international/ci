@@ -3,7 +3,7 @@
  *
  * Single source of truth for diff review prompts used by:
  * - pre-push session review (Groq)
- * - CI code review (Groq)
+ * - CI code review (DeepInfra, GLM-5.2)
  * - session-end structured review (Haiku)
  *
  * All prompts are built from templates/review-patterns.yaml.
