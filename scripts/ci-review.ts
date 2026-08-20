@@ -19,7 +19,7 @@
  *   CI_REVIEW_REASONING_EFFORT     — GLM reasoning effort (default: none — GLM-5.2 "thinking" adds ~5min; none returns in ~11s)
  */
 
-import { execSync } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { type CommitAuthor, checkCommitAuthors } from './lib/commit-author-guard.js'
 import { computeImpactScore, formatImpactScore, type ImpactScore } from './lib/impact-score.js'
@@ -40,6 +40,7 @@ const CI_TIMEOUT_MS = 600_000
 const MAX_CONTEXT_CHARS = 400_000 // ~100K tokens, well within 131K context limit
 const MAX_DIFF_SIZE = MAX_CONTEXT_CHARS // kept as alias for parseDiff compat
 const BUDGET_PER_FILE = 50_000 // cap individual file content in context
+const MIN_DIFF_BUDGET_CHARS = 100_000 // always reserve room for the diff, even with many files
 const RETRY_DELAY_MS = 2_000
 const MAX_RETRIES = 1
 const APPROVAL_COMMENT = 'approved'
@@ -142,11 +143,15 @@ function extractChangedFiles(rawDiff: string): string[] {
 function buildFileContext(changedFiles: string[]): string {
   const sections: string[] = []
   const budgetPerFile = BUDGET_PER_FILE
+  // Cap total file context so the diff always keeps at least MIN_DIFF_BUDGET_CHARS.
+  const maxContextForFiles = MAX_CONTEXT_CHARS - MIN_DIFF_BUDGET_CHARS
+  let accumulated = 0
 
   for (const filePath of changedFiles) {
     if (DOC_EXTENSIONS.has(`.${filePath.split('.').pop()?.toLowerCase()}`)) continue
+    if (accumulated >= maxContextForFiles) break
     try {
-      const content = execSync(`git show HEAD:${filePath}`, {
+      const content = execFileSync('git', ['show', `HEAD:${filePath}`], {
         encoding: 'utf-8',
         timeout: 5_000,
         maxBuffer: 1024 * 1024,
@@ -155,7 +160,9 @@ function buildFileContext(changedFiles: string[]): string {
         content.length > budgetPerFile
           ? `${content.slice(0, budgetPerFile)}\n... (truncated)`
           : content
-      sections.push(`=== FILE: ${filePath} ===\n${truncated}`)
+      const section = `=== FILE: ${filePath} ===\n${truncated}`
+      sections.push(section)
+      accumulated += section.length
     } catch (e) {
       console.debug(`[ci-review] Could not read ${filePath} from HEAD, skipping:`, e)
     }
@@ -185,7 +192,7 @@ function buildUserMessage(diff: string, fileContext: string, prBody = ''): strin
 
   parts.push('## Diff to review\n\n')
   // Budget: leave room for system prompt (~3K) + file context + output tokens
-  const diffBudget = MAX_CONTEXT_CHARS - fileContext.length
+  const diffBudget = Math.max(MIN_DIFF_BUDGET_CHARS, MAX_CONTEXT_CHARS - fileContext.length)
   if (diff.length > diffBudget) {
     parts.push(diff.slice(0, diffBudget))
     parts.push('\n\n... (diff truncated)')
@@ -389,8 +396,9 @@ function formatReviewBody(findings: ReviewFinding[], opts: FormatOptions): strin
 
 function getPrCommitMessages(prNumber: string): string[] {
   try {
-    const json = execSync(
-      `gh pr view ${prNumber} --json commits --jq '.commits[].messageHeadline'`,
+    const json = execFileSync(
+      'gh',
+      ['pr', 'view', String(prNumber), '--json', 'commits', '--jq', '.commits[].messageHeadline'],
       { encoding: 'utf-8', timeout: 10_000 }
     )
     return json.trim().split('\n').filter(Boolean)
@@ -402,16 +410,37 @@ function getPrCommitMessages(prNumber: string): string[] {
 
 // ── Get PR commit authors (for the deterministic placeholder-author guard) ───
 
+interface CommitAuthorsResult {
+  /** True when the `gh` fetch succeeded (even if it returned zero commits). */
+  ok: boolean
+  authors: CommitAuthor[]
+  /** Populated only when ok === false — the fetch error message. */
+  error?: string
+}
+
 function getPrCommitAuthors(prNumber: string): CommitAuthor[] {
+  return fetchPrCommitAuthors(prNumber).authors
+}
+
+function fetchPrCommitAuthors(prNumber: string): CommitAuthorsResult {
   try {
     // One line per commit: <oid>\t<author-name>\t<author-email>. `gh` exposes the
     // git author on each commit's first `authors[]` entry (name + email), which is
     // what `%an`/`%ae` would give from `git log`.
-    const raw = execSync(
-      `gh pr view ${prNumber} --json commits --jq '.commits[] | "\\(.oid)\\t\\(.authors[0].name // "")\\t\\(.authors[0].email // "")"'`,
+    const raw = execFileSync(
+      'gh',
+      [
+        'pr',
+        'view',
+        String(prNumber),
+        '--json',
+        'commits',
+        '--jq',
+        '.commits[] | "\\(.oid)\\t\\(.authors[0].name // "")\\t\\(.authors[0].email // "")"',
+      ],
       { encoding: 'utf-8', timeout: 10_000, maxBuffer: 1024 * 1024 }
     )
-    return raw
+    const authors = raw
       .trim()
       .split('\n')
       .filter(Boolean)
@@ -419,17 +448,42 @@ function getPrCommitAuthors(prNumber: string): CommitAuthor[] {
         const [sha = '', name = '', email = ''] = line.split('\t')
         return { sha, name, email }
       })
+    return { ok: true, authors }
   } catch (err) {
-    console.warn(
-      `[ci-review] PR commit authors fetch failed for #${prNumber}: ${err instanceof Error ? err.message : err}`
-    )
-    return []
+    const message = err instanceof Error ? err.message : String(err)
+    console.warn(`[ci-review] PR commit authors fetch failed for #${prNumber}: ${message}`)
+    return { ok: false, authors: [], error: message }
   }
+}
+
+/**
+ * Resolve the deterministic commit-author findings for a PR. On a successful
+ * fetch this is exactly `checkCommitAuthors(authors)`. If the fetch FAILS, the
+ * guard must NOT fail open (returning `[]` would let a clean-approve slip past),
+ * so a `high` finding is emitted noting the guard could not run — enough to keep
+ * the review from clean-approving.
+ */
+function resolveCommitAuthorFindings(prNumber: string): ReviewFinding[] {
+  const result = fetchPrCommitAuthors(prNumber)
+  if (!result.ok) {
+    return [
+      {
+        file: 'COMMIT_AUTHORS',
+        severity: 'high',
+        category: 'commit-author',
+        description: `The commit-author guard could not run for PR #${prNumber}: fetching commit authors via \`gh\` failed (${result.error ?? 'unknown error'}). Placeholder-author commits cannot be ruled out, so this PR is not clean-approved.`,
+        suggested_fix:
+          'Re-run the code-review workflow. If it keeps failing, verify the `gh` CLI is authenticated and the PR is accessible, then confirm no commit was authored under a placeholder identity (e.g. Test <test@test.com>).',
+        line_range: 'commit-author-guard',
+      },
+    ]
+  }
+  return checkCommitAuthors(result.authors)
 }
 
 function getPrBody(prNumber: string): string {
   try {
-    return execSync(`gh pr view ${prNumber} --json body --jq '.body'`, {
+    return execFileSync('gh', ['pr', 'view', String(prNumber), '--json', 'body', '--jq', '.body'], {
       encoding: 'utf-8',
       timeout: 5_000,
       maxBuffer: 200_000,
@@ -453,11 +507,15 @@ async function postPrReview(
   try {
     const ghEvent = event === 'APPROVE' ? 'APPROVE' : event
     const payload = JSON.stringify({ event: ghEvent, body })
-    execSync(`gh api repos/${repo}/pulls/${prNumber}/reviews --method POST --input -`, {
-      encoding: 'utf-8',
-      timeout: 15_000,
-      input: payload,
-    })
+    execFileSync(
+      'gh',
+      ['api', `repos/${repo}/pulls/${prNumber}/reviews`, '--method', 'POST', '--input', '-'],
+      {
+        encoding: 'utf-8',
+        timeout: 15_000,
+        input: payload,
+      }
+    )
     console.log(`[ci-review] Posted PR review (${event}) to ${repo}#${prNumber}`)
     return true
   } catch (err) {
@@ -508,7 +566,7 @@ async function main(): Promise<void> {
   } else {
     // Read from stdin (piped from gh pr diff)
     try {
-      rawDiff = execSync(`gh pr diff ${prNumber}`, {
+      rawDiff = execFileSync('gh', ['pr', 'diff', String(prNumber)], {
         encoding: 'utf-8',
         maxBuffer: 50 * 1024 * 1024,
         timeout: 30_000,
@@ -528,10 +586,10 @@ async function main(): Promise<void> {
   // worktree's inherited git config) must be caught by code and BLOCK the merge.
   // These findings are merged into every code path below so they can't be
   // bypassed by an empty / docs-only / API-unavailable review.
-  const authorFindings = checkCommitAuthors(getPrCommitAuthors(prNumber))
+  const authorFindings = resolveCommitAuthorFindings(prNumber)
   if (authorFindings.length > 0) {
     console.error(
-      `[ci-review] Placeholder commit author(s) detected: ${authorFindings.length} — blocking merge.`
+      `[ci-review] Commit-author guard raised ${authorFindings.length} finding(s) — blocking clean approval.`
     )
   }
 
@@ -673,6 +731,7 @@ export {
   postPrReview,
   getPrCommitMessages,
   getPrCommitAuthors,
+  resolveCommitAuthorFindings,
   getPrBody,
   CI_TIMEOUT_MS,
   type ReviewResult,

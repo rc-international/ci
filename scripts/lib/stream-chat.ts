@@ -40,6 +40,37 @@ export async function streamChatCompletion(opts: {
   let buffer = ''
   let content = ''
 
+  // Process a single SSE `data:` line. Returns 'done' when [DONE] is seen so the
+  // caller can stop; throws when the payload carries an error envelope.
+  function handleLine(rawLine: string): 'done' | 'continue' {
+    const line = rawLine.trim()
+    if (!line.startsWith('data:')) return 'continue'
+    const payload = line.slice('data:'.length).trim()
+    if (payload === '[DONE]') return 'done'
+    try {
+      const json = JSON.parse(payload) as {
+        error?: unknown
+        choices?: Array<{ delta?: { content?: unknown; reasoning_content?: unknown } }>
+      }
+      // A 200 stream can still carry an error envelope mid-stream — surface it
+      // instead of silently returning partial/empty content (fail-closed).
+      if (json?.error != null) {
+        const err = json.error as { message?: unknown }
+        const message = typeof err?.message === 'string' ? err.message : JSON.stringify(json.error)
+        throw new Error(`stream API returned an error object: ${message}`)
+      }
+      const delta = json?.choices?.[0]?.delta?.content
+      if (typeof delta === 'string') content += delta
+    } catch (e) {
+      // Re-throw our own error envelope; swallow only genuine parse failures.
+      if (e instanceof Error && e.message.startsWith('stream API returned an error object')) {
+        throw e
+      }
+      console.debug('[stream-chat] skipping unparseable SSE data line:', e)
+    }
+    return 'continue'
+  }
+
   // In Bun, res.body is async-iterable and yields Uint8Array chunks.
   for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
     buffer += decoder.decode(chunk, { stream: true })
@@ -48,20 +79,13 @@ export async function streamChatCompletion(opts: {
     buffer = lines.pop() ?? ''
 
     for (const rawLine of lines) {
-      const line = rawLine.trim()
-      if (!line.startsWith('data:')) continue
-      const payload = line.slice('data:'.length).trim()
-      if (payload === '[DONE]') return content
-      try {
-        const json = JSON.parse(payload) as {
-          choices?: Array<{ delta?: { content?: unknown; reasoning_content?: unknown } }>
-        }
-        const delta = json?.choices?.[0]?.delta?.content
-        if (typeof delta === 'string') content += delta
-      } catch (e) {
-        console.debug('[stream-chat] skipping unparseable SSE data line:', e)
-      }
+      if (handleLine(rawLine) === 'done') return content
     }
+  }
+
+  // Flush any final buffered line that wasn't newline-terminated.
+  if (buffer.length > 0) {
+    if (handleLine(buffer) === 'done') return content
   }
 
   return content
