@@ -50,8 +50,10 @@ on:
         type: string
         default: ''
     secrets:
-      CODE_REVIEW_GROQ_API_KEY:
+      CI_REVIEW_DEEPINFRA_API_KEY:
         required: true
+      CODE_REVIEW_GROQ_API_KEY:
+        required: false
       RELEASE_APP_ID:
         required: true
       RELEASE_APP_PRIVATE_KEY:
@@ -114,6 +116,7 @@ jobs:
       - name: Run CI code review
         if: github.event.pull_request.user.login != 'dependabot[bot]'
         env:
+          CI_REVIEW_DEEPINFRA_API_KEY: ${{ secrets.CI_REVIEW_DEEPINFRA_API_KEY }}
           CODE_REVIEW_GROQ_API_KEY: ${{ secrets.CODE_REVIEW_GROQ_API_KEY }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           PR_NUMBER: ${{ inputs.pr_number != '' && inputs.pr_number || github.event.pull_request.number }}
