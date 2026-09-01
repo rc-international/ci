@@ -49,15 +49,23 @@ on:
         required: false
         type: string
         default: ''
+    # All secrets are declared optional (required: false) on purpose. Dependabot
+    # `pull_request` runs execute in a reduced-permission context where org
+    # Actions secrets are unavailable, so `secrets: inherit` passes nothing. If
+    # any secret were `required: true`, GitHub fails the workflow_call at
+    # secret-binding time (~2s) BEFORE any step `if:` is evaluated — which
+    # defeats the per-step dependabot skip below and blocks every dependabot PR.
+    # On real PRs the secrets are inherited normally; a genuinely misconfigured
+    # caller surfaces at the step that consumes the empty secret instead.
     secrets:
       CI_REVIEW_DEEPINFRA_API_KEY:
-        required: true
+        required: false
       CODE_REVIEW_GROQ_API_KEY:
         required: false
       RELEASE_APP_ID:
-        required: true
+        required: false
       RELEASE_APP_PRIVATE_KEY:
-        required: true
+        required: false
 
 permissions:
   pull-requests: write
