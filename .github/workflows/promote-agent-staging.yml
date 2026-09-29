@@ -1,0 +1,109 @@
+# Reusable workflow: promote an agent's source to a staging AgentOS host (Yelo).
+#
+# Called by a per-agent repo on `release: published`. It checks out the agent
+# source at the released tag, fetches the immutable `deploy-agent.sh` promotion
+# primitive from the private valors-vps repo (via a narrowly-scoped GitHub App
+# token — contents:read on valors-vps only), joins the tailnet, and runs the
+# primitive to stage + reload the agent on the target host.
+#
+# The App token is scoped to `valors-vps` alone, so a caller repo can never mint
+# a token that reaches anything else. The target host is reached by the script's
+# own `tailscale ssh` (governed by the tailnet ACL), never by this token.
+name: Promote agent to staging
+
+on:
+  workflow_call:
+    inputs:
+      agent_dir:
+        description: "Directory name under agents/ on the host (e.g. communications-expert)."
+        required: true
+        type: string
+      agent_id:
+        description: "Agno agent id, validated [a-z0-9-] by the primitive (e.g. communications)."
+        required: true
+        type: string
+      target_host:
+        description: "Tailscale host/MagicDNS name of the staging box. Callers pass vars.YELO_TS_HOST."
+        required: true
+        type: string
+      source_path:
+        description: "Path to the agent source within the caller repo. Default '.' (repo root)."
+        required: false
+        type: string
+        default: "."
+      valors_vps_ref:
+        description: "Ref of valors-vps to take deploy-agent.sh from."
+        required: false
+        type: string
+        default: "main"
+      runs_on:
+        description: "Runner label for the promote job."
+        required: false
+        type: string
+        default: "ubuntu-latest"
+    secrets:
+      TS_AUTHKEY:
+        description: "Tailscale auth key (tag:ci, ephemeral) for the runner to join the tailnet."
+        required: true
+      PROMOTER_APP_ID:
+        description: "App id of the dedicated valors-agent-promoter GitHub App (contents:read on valors-vps)."
+        required: true
+      PROMOTER_APP_PRIVATE_KEY:
+        description: "Private key of the valors-agent-promoter GitHub App."
+        required: true
+
+jobs:
+  promote:
+    runs-on: ${{ inputs.runs_on }}
+    permissions:
+      contents: read
+    steps:
+      - name: Mint valors-vps read token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.PROMOTER_APP_ID }}
+          private-key: ${{ secrets.PROMOTER_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: valors-vps
+
+      - name: Checkout agent source at released tag
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.event.release.tag_name }}
+          path: agent-src
+          fetch-depth: 1
+
+      - name: Fetch deploy-agent.sh from valors-vps
+        uses: actions/checkout@v4
+        with:
+          repository: rc-international/valors-vps
+          ref: ${{ inputs.valors_vps_ref }}
+          path: .valors-vps
+          sparse-checkout: |
+            agentos/scripts/deploy-agent.sh
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Join tailnet
+        uses: tailscale/github-action@v2
+        with:
+          authkey: ${{ secrets.TS_AUTHKEY }}
+
+      - name: Promote agent to staging
+        env:
+          TARGET_HOST: ${{ inputs.target_host }}
+          AGENT_DIR: ${{ inputs.agent_dir }}
+          AGENT_ID: ${{ inputs.agent_id }}
+          SOURCE_PATH: ${{ inputs.source_path }}
+        run: |
+          set -euo pipefail
+          SHA="$(git -C agent-src rev-parse HEAD)"
+          echo "Promoting ${AGENT_DIR} (id=${AGENT_ID}) @ ${SHA} to root@${TARGET_HOST}"
+          chmod +x .valors-vps/agentos/scripts/deploy-agent.sh
+          .valors-vps/agentos/scripts/deploy-agent.sh \
+            "root@${TARGET_HOST}" \
+            "${AGENT_DIR}" \
+            "${AGENT_ID}" \
+            "agent-src/${SOURCE_PATH}" \
+            "${SHA}"
