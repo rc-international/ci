@@ -34,7 +34,7 @@ jobs:
     with:
       # --- EDIT PER AGENT ---
       agent_dir: communications-expert   # directory name under agents/ on the host
-      agent_id: communications           # Agno agent id (must match [a-z0-9-])
+      agent_id: communications-expert  # Agno agent id (must match [a-z0-9-])
       # source_path: "."                 # uncomment + set if the agent package is nested
       # --- usually leave as-is ---
       target_host: ${{ vars.YELO_TS_HOST }}
