@@ -1,0 +1,40 @@
+# TEMPLATE — copy this into a new agent repo at .github/workflows/promote-staging.yml
+# to enable release-triggered promotion of that agent to the staging AgentOS host (Yelo).
+#
+# ONBOARDING CHECKLIST for a new expert:
+#   1. Copy this file to <agent-repo>/.github/workflows/promote-staging.yml on the DEFAULT branch.
+#   2. Edit the three `with:` values below: agent_dir, agent_id, and (if the agent
+#      package is not at the repo root) source_path.
+#   3. Ensure the repo can read the org secrets/vars it references:
+#        - secrets: TS_AUTHKEY, PROMOTER_APP_ID, PROMOTER_APP_PRIVATE_KEY
+#        - vars:    YELO_TS_HOST
+#      If those org secrets/vars use "selected repositories" visibility, add this
+#      repo to each of their visibility lists (org owner / gh secret set --repos).
+#   4. Add a tailnet ACL grant so `tag:ci` can SSH the target host (already present for Yelo).
+#
+# RELEASE-TRIGGER CAVEAT (learned the hard way): `release: published` only fires a
+# run when the workflow file exists on the tagged commit. Cut the GitHub Release on
+# a commit that already contains THIS file on the default branch, or the run won't start.
+
+name: Promote to staging (Yelo)
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  promote:
+    permissions:
+      contents: read
+    uses: rc-international/ci/.github/workflows/promote-agent-staging.yml@main
+    secrets:
+      TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
+      PROMOTER_APP_ID: ${{ secrets.PROMOTER_APP_ID }}
+      PROMOTER_APP_PRIVATE_KEY: ${{ secrets.PROMOTER_APP_PRIVATE_KEY }}
+    with:
+      # --- EDIT PER AGENT ---
+      agent_dir: communications-expert   # directory name under agents/ on the host
+      agent_id: communications           # Agno agent id (must match [a-z0-9-])
+      # source_path: "."                 # uncomment + set if the agent package is nested
+      # --- usually leave as-is ---
+      target_host: ${{ vars.YELO_TS_HOST }}
