@@ -267,11 +267,73 @@ If the code looks clean, return: {"findings": []}
 
 Respond with ONLY {"findings": [...]}, no markdown fencing, no explanation.`
 
+// ── Writing standard ─────────────────────────────────────────────────────────
+
+// rules/ in a wilco checkout; scripts/lib/ in the rc-international/ci copy,
+// whose reusable workflow sparse-checks-out only scripts/ci-review.ts + scripts/lib/.
+export const WRITING_STANDARD_PATHS = [
+  join(__dirname, '..', '..', 'rules', 'terse-briefings.md'),
+  join(__dirname, 'terse-briefings.md'),
+]
+
+/**
+ * Return the `- ` bullets of the `## Language` section, or null if absent.
+ * Only the bullets: the section's Scope/Measurement paragraphs describe the
+ * ste-coach hook, not how to write, and would cost input tokens per chunk.
+ */
+export function extractLanguageRules(markdown: string): string | null {
+  const lines = markdown.split('\n')
+  const start = lines.findIndex((l) => /^## Language\b/.test(l))
+  if (start < 0) return null
+  const rest = lines.slice(start + 1)
+  const end = rest.findIndex((l) => l.startsWith('## '))
+  const bullets = (end < 0 ? rest : rest.slice(0, end)).filter((l) => l.startsWith('- '))
+  return bullets.length ? bullets.join('\n') : null
+}
+
+/**
+ * Load the writing standard for finding text from rules/terse-briefings.md.
+ * Read at runtime so the gate and the rule cannot drift
+ * (docs/design/review-gate-v2.md). Missing file → null; the review still runs.
+ */
+export function loadWritingStandard(paths: string[] = WRITING_STANDARD_PATHS): string | null {
+  const path = paths.find((p) => existsSync(p))
+  if (!path) {
+    console.warn(
+      `[review-prompt] Writing standard not found at ${paths.join(' or ')}; finding text is not STE-constrained.`
+    )
+    return null
+  }
+  try {
+    const rules = extractLanguageRules(readFileSync(path, 'utf-8'))
+    if (!rules) {
+      console.warn(
+        `[review-prompt] No "## Language" bullets in ${path}; finding text is not STE-constrained.`
+      )
+      return null
+    }
+    return `## Writing standard for finding text
+
+Write "description", "failure_scenario" and "suggested_fix" in ASD-STE100, loosely applied:
+${rules}`
+  } catch (err) {
+    console.warn(`[review-prompt] Failed to load writing standard from ${path}:`, err)
+    return null
+  }
+}
+
 // ── Prompt builder ───────────────────────────────────────────────────────────
 
-export function buildReviewPrompt(yamlPath?: string): string {
+export function buildReviewPrompt(yamlPath?: string, writingStandardPaths?: string[]): string {
+  const writingStandard = loadWritingStandard(writingStandardPaths)
   const patterns = loadReviewPatterns(yamlPath)
-  if (!patterns) return FALLBACK_PROMPT
+  if (!patterns) {
+    // Same placement as the YAML path: before the output format, so the JSON-only
+    // directive stays the last instruction.
+    return writingStandard
+      ? FALLBACK_PROMPT.replace('\n## Output format', `\n${writingStandard}\n\n## Output format`)
+      : FALLBACK_PROMPT
+  }
 
   const lines: string[] = []
   lines.push(
@@ -328,6 +390,11 @@ export function buildReviewPrompt(yamlPath?: string): string {
     for (const c of additionalChecks) {
       lines.push(`- ${c.description}`)
     }
+  }
+
+  if (writingStandard) {
+    lines.push('')
+    lines.push(writingStandard)
   }
 
   lines.push('')
