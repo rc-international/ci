@@ -15,15 +15,24 @@
  *   GITHUB_REPOSITORY              — owner/repo (set by GitHub Actions)
  *   PR_NUMBER                      — pull request number
  *   CI_REVIEW_MODEL                — model override (default: zai-org/GLM-5.2)
+ *   CI_REVIEW_FALLBACK_MODEL       — tried when the primary is overloaded/failing
+ *                                    (default: deepseek-ai/DeepSeek-V4-Pro; '' disables)
  *   CI_REVIEW_ENDPOINT             — endpoint override (default: DeepInfra chat/completions)
  *   CI_REVIEW_REASONING_EFFORT     — GLM reasoning effort (default: none — GLM-5.2 "thinking" adds ~5min; none returns in ~11s)
  */
 
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
+import type { Nodes, Root } from 'mdast'
+import { fromMarkdown } from 'mdast-util-from-markdown'
+import { toString as mdastToString } from 'mdast-util-to-string'
 import { type CommitAuthor, checkCommitAuthors } from './lib/commit-author-guard.js'
 import { computeImpactScore, formatImpactScore, type ImpactScore } from './lib/impact-score.js'
-import { buildReviewPrompt, type ReviewFinding } from './lib/review-prompt.js'
+import {
+  buildReviewPrompt,
+  PR_BODY_REQUIRED_SECTIONS,
+  type ReviewFinding,
+} from './lib/review-prompt.js'
 import { streamChatCompletion } from './lib/stream-chat.js'
 
 // ── Configuration ────────────────────────────────────────────────────────────
@@ -43,6 +52,51 @@ const BUDGET_PER_FILE = 50_000 // cap individual file content in context
 const MIN_DIFF_BUDGET_CHARS = 100_000 // always reserve room for the diff, even with many files
 const RETRY_DELAY_MS = 2_000
 const MAX_RETRIES = 1
+// Provider overload (429/503, engine_overloaded) gets a 5.5-min backoff. Observed
+// 2026-10-03, PR #798: DeepInfra returned 429 engine_overloaded within ~3s on
+// both tries (runs 15:15 and 16:12 UTC), so the review was skipped and needed a
+// human approval. Recovery time is not measured; the schedule is an estimate:
+// roughly tripling gaps within a 5.5-min total, so a stuck provider costs one
+// bounded wait. No jitter: one job retries sequentially, nothing to de-sync. A
+// timeout already cost up to CI_TIMEOUT_MS, so it keeps the single short retry.
+const OVERLOAD_BACKOFF_MS = [15_000, 45_000, 90_000, 180_000]
+// Second DeepInfra model, same API key. The full 5.5-min backoff did not save
+// PR #802 (run 37139427368: 429 engine_overloaded on all 5 attempts); each such
+// run posts the skip notice and needs a manual `approved`.
+// A different vendor's model is unlikely to be overloaded at the same moment.
+// Probed 2026-10-04: DeepSeek-V4-Pro accepts response_format=json_object and
+// reasoning_effort=none, 1M context. Set CI_REVIEW_FALLBACK_MODEL='' to disable.
+const FALLBACK_MODEL = process.env.CI_REVIEW_FALLBACK_MODEL ?? 'deepseek-ai/DeepSeek-V4-Pro'
+// Overload retries on a model that has a fallback behind it. One short wait,
+// then switch: waiting longer on an overloaded primary is what failed on #802.
+const OVERLOAD_RETRIES_BEFORE_FALLBACK = 1
+
+function isOverload(errMessage: string): boolean {
+  return /\b(429|503)\b|engine_overloaded/.test(errMessage)
+}
+
+/**
+ * Delay before retrying the SAME model (retry is 1-based), or null to stop
+ * using that model (move to the fallback if there is one, else give up).
+ */
+export function retryDelayMs(
+  retry: number,
+  errMessage: string,
+  hasFallback = false
+): number | null {
+  // max_tokens truncation repeats with identical params — do not retry it.
+  if (errMessage.includes('finish_reason=length')) return null
+  if (isOverload(errMessage)) {
+    if (hasFallback && retry > OVERLOAD_RETRIES_BEFORE_FALLBACK) return null
+    return OVERLOAD_BACKOFF_MS[retry - 1] ?? null
+  }
+  return retry <= MAX_RETRIES ? RETRY_DELAY_MS : null
+}
+
+/** Models to try in order: primary, then fallback if set and different. */
+export function reviewModels(primary: string, fallback: string): string[] {
+  return fallback && fallback !== primary ? [primary, fallback] : [primary]
+}
 const APPROVAL_COMMENT = 'approved'
 const TRUSTED_APPROVAL_ASSOCIATIONS = new Set(['OWNER', 'MEMBER'])
 
@@ -66,6 +120,8 @@ const DOC_EXTENSIONS = new Set([
 interface ReviewResult {
   findings: ReviewFinding[]
   apiError: boolean
+  /** Model that produced the findings (set when apiError is false). */
+  model?: string
 }
 
 interface DiffInfo {
@@ -227,18 +283,46 @@ function getManualApprovalFromEnv(
   }
 }
 
+interface CallReviewOptions {
+  /** Models in try order. Default: primary + fallback (see reviewModels). */
+  models?: string[]
+  /** Injectable for tests so backoff waits don't run in real time. */
+  sleep?: (ms: number) => Promise<void>
+}
+
 async function callReviewModel(
   apiKey: string,
   diff: string,
   fileContext: string,
-  prBody = ''
+  prBody = '',
+  opts: CallReviewOptions = {}
 ): Promise<ReviewResult> {
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    if (attempt > 0) {
-      console.log(`[ci-review] Retrying review API (attempt ${attempt + 1})...`)
-      await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS))
+  const models = opts.models ?? reviewModels(REVIEW_MODEL, FALLBACK_MODEL)
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)))
+  for (const [i, model] of models.entries()) {
+    const hasFallback = i < models.length - 1
+    const result = await callOneModel(apiKey, model, diff, fileContext, prBody, hasFallback, sleep)
+    if (!result.apiError) {
+      if (i > 0) console.warn(`[ci-review] Review served by fallback model ${model}.`)
+      return result
     }
+    if (hasFallback) {
+      console.warn(`[ci-review] ${model} unavailable — switching to fallback ${models[i + 1]}.`)
+    }
+  }
+  return { findings: [], apiError: true }
+}
 
+async function callOneModel(
+  apiKey: string,
+  model: string,
+  diff: string,
+  fileContext: string,
+  prBody: string,
+  hasFallback: boolean,
+  sleep: (ms: number) => Promise<void>
+): Promise<ReviewResult> {
+  for (let attempt = 0; ; attempt++) {
     try {
       // Stream the completion. DeepInfra silently drops the socket after ~4.5min
       // on long non-streaming inference; GLM-5.2's reasoning_content deltas keep
@@ -247,7 +331,7 @@ async function callReviewModel(
         endpoint: REVIEW_ENDPOINT,
         apiKey,
         body: {
-          model: REVIEW_MODEL,
+          model,
           messages: [
             {
               role: 'user',
@@ -286,20 +370,21 @@ async function callReviewModel(
             ['critical', 'high', 'medium', 'low', 'needs-verification'].includes(f.severity)
         ),
         apiError: false,
+        model,
       }
     } catch (err) {
       const e = err as Error
       if (e?.name === 'TimeoutError' || e?.name === 'AbortError') {
-        console.error(`[ci-review] review API timed out (${CI_TIMEOUT_MS / 1000}s limit)`)
+        console.error(`[ci-review] ${model} review API timed out (${CI_TIMEOUT_MS / 1000}s limit)`)
       } else {
-        console.error('[ci-review] review API error:', e?.message || err)
+        console.error(`[ci-review] ${model} review API error:`, e?.message || err)
       }
-      if (attempt < MAX_RETRIES) continue
-      return { findings: [], apiError: true }
+      const delay = retryDelayMs(attempt + 1, String(e?.message ?? err), hasFallback)
+      if (delay === null) return { findings: [], apiError: true }
+      console.log(`[ci-review] Retrying ${model} in ${delay / 1000}s (attempt ${attempt + 2})...`)
+      await sleep(delay)
     }
   }
-
-  return { findings: [], apiError: true }
 }
 
 // ── Review formatting ───────────────────────────────────────────────────────
@@ -309,10 +394,27 @@ function reviewEvent(findings: ReviewFinding[]): 'REQUEST_CHANGES' | 'COMMENT' |
   return hasCriticalOrHigh ? 'REQUEST_CHANGES' : 'APPROVE'
 }
 
+/**
+ * Decide what to post when the LLM review did NOT run (no API key, or the review
+ * API errored). Deterministic findings (commit-author guard + PR-body required
+ * sections) are established WITHOUT the model, so they must still block: if any
+ * exist we REQUEST_CHANGES; otherwise we fall back to the manual-approval
+ * COMMENT. This is factored out so the "API down must not silently drop the
+ * deterministic PR-body enforcement" contract is unit-testable without invoking
+ * `main()` (which calls `gh` and `process.exit`).
+ */
+function reviewOutcomeWithoutModel(
+  deterministicFindings: ReviewFinding[]
+): 'REQUEST_CHANGES' | 'COMMENT' {
+  return deterministicFindings.length > 0 ? 'REQUEST_CHANGES' : 'COMMENT'
+}
+
 interface FormatOptions {
   wasTruncated: boolean
   fileCount: number
   impactScore?: ImpactScore
+  /** Set when the fallback model served the review, so readers know. */
+  fallbackModel?: string
 }
 
 function formatReviewBody(findings: ReviewFinding[], opts: FormatOptions): string {
@@ -321,6 +423,13 @@ function formatReviewBody(findings: ReviewFinding[], opts: FormatOptions): strin
   lines.push('')
   lines.push('> This review was generated by the wilco CI code review pipeline.')
   lines.push('')
+
+  if (opts.fallbackModel) {
+    lines.push(
+      `> **Note:** Primary model ${REVIEW_MODEL} was unavailable; reviewed by fallback ${opts.fallbackModel}.`
+    )
+    lines.push('')
+  }
 
   if (opts.wasTruncated) {
     lines.push(
@@ -496,6 +605,139 @@ function getPrBody(prNumber: string): string {
   }
 }
 
+// ── Deterministic PR-body required-section check ────────────────────────────
+
+/**
+ * Deterministically check the PR body for the ALWAYS-required sections
+ * (PR_BODY_REQUIRED_SECTIONS: `## Summary`, `## Changes`, `## Test Plan`).
+ *
+ * "Does this string contain a `## Changes` heading" is not a judgement call, so
+ * it must not be left to the LLM reviewer: on darena #589 the model posted a
+ * false CHANGES_REQUESTED claiming `## Changes` was missing from a body that
+ * plainly contained it. This code answers that question; the prompt no longer
+ * asks the model to (see PR_STRUCTURE_RULE). The CONDITIONAL sections
+ * (Operator Deploy Steps / Expected Outcomes) stay with the model because
+ * whether they are required depends on judging the diff.
+ *
+ * Implementation: parse the body with a real CommonMark parser
+ * (`mdast-util-from-markdown`) and collect the TOP-LEVEL level-2 (`depth === 2`)
+ * `heading` nodes — direct children of the AST root, NOT recursing into
+ * containers — comparing each heading's plain text (via `mdast-util-to-string`,
+ * trimmed) against the section names. Restricting to top-level headings means a
+ * heading nested inside a blockquote (`> ## Changes`) or a list item is treated
+ * as quoted/embedded content and does NOT satisfy the check. This replaced a
+ * hand-rolled regex + fence/HTML-comment stripping pair that diverged from
+ * real Markdown once per review round: it accepted 4-space-indented headings,
+ * headings inside fences, decorated headings, and headings inside HTML
+ * comments, and its FINAL bug was a FALSE NEGATIVE — a ``` marker inside an
+ * HTML comment was treated as a real fence opener (fences were stripped before
+ * comments), blanking every valid heading after the comment. A real parser
+ * handles fenced code, indented code, HTML comments, CRLF, and setext headings
+ * natively, so all of those cases are correct by construction rather than by
+ * accumulating special cases.
+ *
+ * Comparison rule: the section constants include the `## ` prefix (e.g.
+ * `'## Changes'`), which is the single source of truth. We strip that prefix to
+ * get the bare name and require the parsed heading text to equal it EXACTLY
+ * (after trimming surrounding whitespace — GitHub-flavoured headings routinely
+ * carry a trailing space, and the parser already drops ATX closing hashes). So
+ * `### Changes` (depth 3), `## Changesss` (longer), a mid-line mention, and a
+ * decorated `## Changes (menu producer)` / `## Changes are intentionally
+ * omitted` all correctly FAIL to satisfy. The false-NEGATIVE risk of the exact
+ * match (a human writing a decorated heading) is mitigated by a finding message
+ * naming the bare-heading requirement — see below.
+ *
+ * What the check does NOT require: the ATX `## ` syntax specifically. A setext
+ * heading (a line underlined with `---`) and an inline-formatted heading
+ * (`## **Changes**`) both parse to a top-level `depth === 2` heading reading
+ * `Changes`, so both SATISFY — they render as real level-2 sections and
+ * rejecting them would reintroduce the false-negative over-rejection this change
+ * exists to prevent. The finding message therefore names a top-level level-2
+ * heading whose text is exactly the section name as the contract, recommending
+ * the bare `## Changes` form as the simplest way to meet it — it does not claim
+ * the line must literally be `## Changes`.
+ */
+
+/** Bare section name from a constant that carries the `## ` ATX prefix. */
+function sectionName(section: string): string {
+  return section.replace(/^#{1,6}\s*/, '').trim()
+}
+
+/**
+ * Collect the trimmed plain text of every TOP-LEVEL level-2 heading — i.e. a
+ * `heading` node with `depth === 2` that is a DIRECT child of the AST root.
+ *
+ * We deliberately do NOT recurse into containers. A depth-2 heading nested
+ * inside a blockquote (`> ## Changes`) or a list item is quoted/embedded
+ * content, not a document section, and must not satisfy the required-section
+ * check — a recursive walk accepting it was the defect this fix addresses.
+ *
+ * Setext headings (a line underlined with `---`) and inline-formatted headings
+ * (`## **Changes**`) ARE still accepted: both parse to a top-level `depth === 2`
+ * heading whose `mdastToString` plain text is `Changes`, and both render as a
+ * real level-2 section. Rejecting them would be over-strict and reintroduce the
+ * false-negative over-rejection (darena #589) this whole change exists to
+ * prevent — so restricting to top-level is the only tightening here.
+ *
+ * We pass `includeHtml: false` to `mdastToString` so an inline HTML comment in a
+ * heading (`## Changes <!-- template note -->`, a common PR-template shape) is
+ * NOT serialized into the text. Without it the comment string is appended and
+ * the heading is wrongly rejected — a FALSE NEGATIVE that blocks a valid PR,
+ * exactly the failure this deterministic check exists to eliminate. Dropping the
+ * comment can leave stray whitespace where it stood (`Changes <!--x--> more` →
+ * `Changes  more`), so we also collapse internal whitespace runs before the
+ * exact-match compare; a heading that is ONLY a comment (`## <!-- Changes -->`)
+ * correctly serializes to empty and still fails.
+ */
+function collectDepth2Headings(tree: Root): Set<string> {
+  const headings = new Set<string>()
+  for (const node of tree.children as Nodes[]) {
+    if (node.type === 'heading' && node.depth === 2) {
+      const text = mdastToString(node, { includeHtml: false }).replace(/\s+/g, ' ').trim()
+      headings.add(text)
+    }
+  }
+  return headings
+}
+
+function checkPrBodySections(prBody: string | undefined | null): ReviewFinding[] {
+  const body = prBody ?? ''
+  const findings: ReviewFinding[] = []
+
+  // Parse once. A parse failure on pathological input must FAIL CLOSED — the
+  // whole point of this deterministic check is that a missing required section
+  // blocks the merge; treating an unparseable body as "all sections present"
+  // would silently re-open the exact bypass this check exists to remove. So on
+  // a throw we log, capture the error, and flag every required section missing.
+  let present: Set<string>
+  try {
+    present = collectDepth2Headings(fromMarkdown(body) as Root)
+  } catch (err) {
+    console.error(
+      `[ci-review] PR-body Markdown parse failed; treating all required sections as missing (fail-closed): ${err instanceof Error ? err.message : String(err)}`
+    )
+    present = new Set()
+  }
+
+  for (const section of PR_BODY_REQUIRED_SECTIONS) {
+    // section already includes the `## ` prefix, e.g. "## Changes"; compare the
+    // parsed heading text against the bare name. Exact match (trimmed) so a
+    // decorated or longer heading does not satisfy — see the doc comment above.
+    if (present.has(sectionName(section))) continue
+
+    findings.push({
+      file: 'PR_BODY',
+      severity: 'high',
+      category: 'pr-structure',
+      description: `The PR body is missing the required \`${section}\` section. It needs a top-level level-2 Markdown heading whose text is EXACTLY \`${sectionName(section)}\` — the simplest way is a line containing only \`${section}\`. A decorated heading such as \`${section} (details)\` or \`${section} — notes\` does NOT count (move the extra text to the line below), and a heading nested inside a blockquote or list item (e.g. \`> ${section}\`) does NOT count — the heading must be a top-level section, not quoted or embedded content. Per docs/glossary.md "PR" recipe step 10, every PR body must contain ${PR_BODY_REQUIRED_SECTIONS.map((s) => `\`${s}\``).join(', ')}.`,
+      suggested_fix: `Add a top-level level-2 heading reading exactly \`${sectionName(section)}\` (the plain form \`${section}\` on its own line), not nested inside a blockquote or list, and put any qualifier on the following line.`,
+      line_range: section,
+    })
+  }
+
+  return findings
+}
+
 // ── Post PR review via GitHub CLI ───────────────────────────────────────────
 
 async function postPrReview(
@@ -503,7 +745,7 @@ async function postPrReview(
   repo: string,
   event: 'REQUEST_CHANGES' | 'COMMENT' | 'APPROVE',
   body: string
-): Promise<boolean> {
+): Promise<void> {
   try {
     const ghEvent = event === 'APPROVE' ? 'APPROVE' : event
     const payload = JSON.stringify({ event: ghEvent, body })
@@ -517,10 +759,12 @@ async function postPrReview(
       }
     )
     console.log(`[ci-review] Posted PR review (${event}) to ${repo}#${prNumber}`)
-    return true
   } catch (err) {
+    // Rethrow: an unposted review is a review that did not happen. The fatal
+    // handler exits 1 so the required `code-review` check goes red instead of
+    // green-with-no-review.
     console.error(`[ci-review] Failed to post PR review: ${(err as Error)?.message || err}`)
-    return false
+    throw err
   }
 }
 
@@ -593,12 +837,33 @@ async function main(): Promise<void> {
     )
   }
 
+  // Deterministic always-required-section check — code answers "does the body
+  // contain `## Changes`", the model no longer does (it hallucinated a missing
+  // section on darena #589; see PR_STRUCTURE_RULE). Like the author guard, this
+  // is established WITHOUT the model, so it is computed here — before the
+  // no-API-key and API-error early exits — and merged into EVERY code path
+  // below. A missing required section must block the merge even when the review
+  // API is unavailable; letting it through on an unrelated outage would be the
+  // same silent-bypass this deterministic check exists to remove.
+  const prBody = getPrBody(prNumber)
+  const prBodyFindings = checkPrBodySections(prBody)
+  if (prBodyFindings.length > 0) {
+    console.error(
+      `[ci-review] PR-body section check raised ${prBodyFindings.length} finding(s): ${prBodyFindings.map((f) => f.line_range).join(', ')}`
+    )
+  }
+
+  // All findings that do not depend on the LLM. If any exist, the review must
+  // REQUEST_CHANGES no matter which downstream path (empty/docs/no-key/api-error)
+  // is taken.
+  const deterministicFindings = [...authorFindings, ...prBodyFindings]
+
   if (diffInfo.isEmpty) {
     console.log('[ci-review] Empty diff, skipping code review.')
-    const event = authorFindings.length > 0 ? 'REQUEST_CHANGES' : 'APPROVE'
+    const event = deterministicFindings.length > 0 ? 'REQUEST_CHANGES' : 'APPROVE'
     const body =
-      authorFindings.length > 0
-        ? formatReviewBody(authorFindings, { wasTruncated: false, fileCount: 0 })
+      deterministicFindings.length > 0
+        ? formatReviewBody(deterministicFindings, { wasTruncated: false, fileCount: 0 })
         : '## Automated Code Review\n\nNo changes to review — approved.'
     await postPrReview(prNumber, repo, event, body)
     process.exit(0)
@@ -606,10 +871,13 @@ async function main(): Promise<void> {
 
   if (diffInfo.isDocsOnly) {
     console.log('[ci-review] Docs-only changes, skipping code review.')
-    const event = authorFindings.length > 0 ? 'REQUEST_CHANGES' : 'APPROVE'
+    const event = deterministicFindings.length > 0 ? 'REQUEST_CHANGES' : 'APPROVE'
     const body =
-      authorFindings.length > 0
-        ? formatReviewBody(authorFindings, { wasTruncated: false, fileCount: diffInfo.fileCount })
+      deterministicFindings.length > 0
+        ? formatReviewBody(deterministicFindings, {
+            wasTruncated: false,
+            fileCount: diffInfo.fileCount,
+          })
         : '## Automated Code Review\n\nNo code changes to review (documentation only) — approved.'
     await postPrReview(prNumber, repo, event, body)
     process.exit(0)
@@ -617,14 +885,15 @@ async function main(): Promise<void> {
 
   if (!apiKey) {
     console.warn('[ci-review] CI_REVIEW_DEEPINFRA_API_KEY not set. Skipping LLM review.')
-    // Even with the LLM unavailable, a placeholder author is a deterministic
-    // block — don't let it fall through to the manual-approval path.
-    if (authorFindings.length > 0) {
+    // Even with the LLM unavailable, the author guard and the PR-body section
+    // check are deterministic blocks — don't let them fall through to the
+    // manual-approval path just because the model was skipped.
+    if (reviewOutcomeWithoutModel(deterministicFindings) === 'REQUEST_CHANGES') {
       await postPrReview(
         prNumber,
         repo,
         'REQUEST_CHANGES',
-        formatReviewBody(authorFindings, {
+        formatReviewBody(deterministicFindings, {
           wasTruncated: diffInfo.wasTruncated,
           fileCount: diffInfo.fileCount,
         })
@@ -646,19 +915,21 @@ async function main(): Promise<void> {
   console.log(
     `[ci-review] Reviewing ${diffInfo.fileCount} files (${changedFiles.length} with full context, ${Math.round(fileContext.length / 1000)}KB)...`
   )
-  const prBody = getPrBody(prNumber)
   const result = await callReviewModel(apiKey, diffInfo.cleanDiff, fileContext, prBody)
 
   if (result.apiError) {
     console.warn('[ci-review] review API failed. Posting skip notice.')
-    // The author guard is deterministic and must still block even if the LLM
-    // review couldn't run.
-    if (authorFindings.length > 0) {
+    // The author guard and PR-body section check are deterministic and must
+    // still block even when the LLM review couldn't run. A missing required
+    // section is a fact established without the model, so an unrelated API
+    // outage must not silently let it through — that is exactly the bypass this
+    // deterministic check exists to close.
+    if (reviewOutcomeWithoutModel(deterministicFindings) === 'REQUEST_CHANGES') {
       await postPrReview(
         prNumber,
         repo,
         'REQUEST_CHANGES',
-        formatReviewBody(authorFindings, {
+        formatReviewBody(deterministicFindings, {
           wasTruncated: diffInfo.wasTruncated,
           fileCount: diffInfo.fileCount,
         })
@@ -674,9 +945,9 @@ async function main(): Promise<void> {
     process.exit(0) // Don't fail the workflow on API issues
   }
 
-  // Merge the deterministic author findings with the LLM findings so they
-  // participate in severity counting and REQUEST_CHANGES escalation.
-  const findings = [...authorFindings, ...result.findings]
+  // Merge the deterministic author + PR-body findings with the LLM findings so
+  // they participate in severity counting and REQUEST_CHANGES escalation.
+  const findings = [...deterministicFindings, ...result.findings]
 
   // Compute impact score (non-blocking: failures don't affect review)
   let impactScore: ImpactScore | undefined
@@ -693,6 +964,7 @@ async function main(): Promise<void> {
     wasTruncated: diffInfo.wasTruncated,
     fileCount: diffInfo.fileCount,
     impactScore,
+    fallbackModel: result.model !== REVIEW_MODEL ? result.model : undefined,
   })
 
   await postPrReview(prNumber, repo, event, body)
@@ -728,11 +1000,15 @@ export {
   parseDiff,
   formatReviewBody,
   reviewEvent,
+  reviewOutcomeWithoutModel,
   postPrReview,
   getPrCommitMessages,
+  FALLBACK_MODEL,
+  REVIEW_MODEL,
   getPrCommitAuthors,
   resolveCommitAuthorFindings,
   getPrBody,
+  checkPrBodySections,
   CI_TIMEOUT_MS,
   type ReviewResult,
   type DiffInfo,
@@ -754,7 +1030,10 @@ export type { ReviewFinding } from './lib/review-prompt.js'
 // Only run main when executed directly
 if (!process.env.__CI_REVIEW_TEST) {
   main().catch((err) => {
+    // Exit 1: `code-review` is a required status check. A crash that exits 0
+    // shows a green check although no review was posted. API outages are not
+    // routed here — they post a skip notice and exit 0 inside main().
     console.error('[ci-review] Fatal error:', err)
-    process.exit(0) // Don't fail workflow on script errors
+    process.exit(1)
   })
 }

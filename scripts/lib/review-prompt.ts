@@ -27,6 +27,12 @@ export interface ReviewFinding {
   description: string
   suggested_fix: string
   line_range: string
+  // P1a precision fields (optional, backward compatible). A finding without them
+  // stays valid; the shadow verdict uses them to decide whether a non-critical,
+  // non-security block is evidence-backed.
+  rule_id?: string // the engineering-rule id/slug the finding maps to
+  evidence?: string // verbatim diff line(s) the finding is about
+  failure_scenario?: string // concrete input/state → wrong outcome
 }
 
 export interface ReviewPattern {
@@ -69,17 +75,22 @@ export const PR_BODY_CONDITIONAL_SECTIONS = [
 /**
  * Reusable PR-structure rule, injected into both buildReviewPrompt() and FALLBACK_PROMPT
  * so the prompt content is identical regardless of YAML availability.
+ *
+ * NOTE: the ALWAYS-required sections (## Summary, ## Changes, ## Test Plan) are
+ * checked DETERMINISTICALLY in code (see checkPrBodySections in ci-review.ts) —
+ * "does the body contain this heading" is not a judgement call. Asking the model
+ * to also judge it produced a false CHANGES_REQUESTED on darena #589 (it claimed
+ * `## Changes` was missing from a body that plainly contained it). Those checks
+ * are therefore removed from this prompt. What REMAINS here is genuine judgement:
+ * whether a diff "touches production" (→ Operator Deploy Steps) or is "non-trivial"
+ * (→ Expected Outcomes), and whether present sections are vague/unverifiable.
  */
 export const PR_STRUCTURE_RULE = `### PR structure
-When the user message contains a \`## PR Body\` block, evaluate the PR body against the structure required by \`docs/glossary.md\` "PR" recipe step 10. The PR body MUST contain:
-- \`## Summary\` (always)
-- \`## Changes\` (always)
-- \`## Test Plan\` (always)
-- \`## Operator Deploy Steps\` (required if the diff touches production code: fleet scripts, services, scheduled jobs, infra, schemas, CI workflows)
-- \`## Expected Outcomes\` (required on non-trivial PRs — anything bigger than a typo)
+When the user message contains a \`## PR Body\` block, evaluate the PR body against the structure required by \`docs/glossary.md\` "PR" recipe step 10. The presence of the always-required sections (\`## Summary\`, \`## Changes\`, \`## Test Plan\`) is verified deterministically in code — do NOT emit a finding about those sections being missing. Judge only the CONDITIONAL sections and the quality of sections that are present:
+- \`## Operator Deploy Steps\` — required if the diff touches production code (fleet scripts, services, scheduled jobs, infra, schemas, CI workflows). Flag HIGH if it is required by the diff but missing.
+- \`## Expected Outcomes\` — required on non-trivial PRs (anything bigger than a typo). Flag HIGH if it is required but missing.
 
-Flag as HIGH severity:
-- Missing required section
+Also flag as HIGH severity:
 - \`## Operator Deploy Steps\` items that are vague (e.g. "deploy somehow", "rsync to fleet" with no command, "restart the service" with no service name)
 - \`## Expected Outcomes\` items without verifiable acceptance criteria (e.g. "verify it works", "should be fine", no \`- [ ]\` checklist)
 - \`## Test Plan\` post-merge items (\`- [ ]\`) that are not runnable commands
@@ -128,7 +139,7 @@ Evaluate the diff against the rules below. For ANY real violation visible in the
 
 16. Unbounded logs. HIGH when: a new or modified app, service, script, cron job, or container writes a log with no size bound or rotation — no logrotate stanza (\`copytruncate\` for a writer that holds the fd open, \`create\` for one that reopens per run), no docker \`log-opts\` \`max-size\`/\`max-file\`, no journald \`SystemMaxUse\`, or a home-grown rotation that a short-lived / cron process never fires. Every log must have a size cap and retention.
 
-17. Missing structured production logging (valors-observability). CRITICAL when: new or modified production code (a service, worker, request handler, pipeline stage, scheduled job) emits logs through a raw logger — \`console.log\` / \`console.info\` / \`console.warn\` / \`console.error\` / \`console.debug\` (TypeScript) or \`print(...)\` / \`logging.getLogger(...)\` / a bare \`logging.*\` call (Python) — instead of the mandatory Valors logger (\`import { getLogger } from '@valors/logging'\` then \`getLogger(service, module)\` in TypeScript; \`from valors_logging import get_logger\` then \`get_logger(service, module)\` in Python); or a new production service/worker adds non-trivial logic with NO logging at all. Raw console/print output bypasses the JSON log schema that Vector ships to the observability pipeline, so production failures become invisible — this is a prod-observability gap, not a style nit. Prefer importing the valors logger and emitting structured events. Exempt: one-shot CLI/CI scripts (files under \`scripts/\` invoked via \`bun scripts/*.ts\` or a GitHub Actions \`run:\` step) whose stdout IS the log — these should use \`console.*\` because \`@valors/logging\` is not a dependency in that context and structured JSON reduces readability for human log consumers; flag only if \`@valors/logging\` is already imported in the same file. Also exempt: the Companion app (files under \`companion/web/**\`), which has its OWN stacksniper-based structured logger — \`import { createLogger } from './logger.js'\` then \`createLogger(module)\`, emitting DuckDB-ready JSONL to \`~/.wilco/logs/\`. Treat \`createLogger(...)\` and \`log.debug|info|warn|error(...)\` in companion code as compliant structured logging; do NOT require \`@valors/logging\` there. Raw \`console.*\` / \`print\` in companion production code is STILL a finding.
+17. Missing structured production logging (valors-observability). CRITICAL when: new or modified production code (a service, worker, request handler, pipeline stage, scheduled job) emits logs through a raw logger — \`console.log\` / \`console.info\` / \`console.warn\` / \`console.error\` / \`console.debug\` (TypeScript) or \`print(...)\` (Python) — instead of the mandatory Valors logger (\`import { getLogger } from '@valors/logging'\` then \`getLogger(service, module)\` in TypeScript; \`from valors_logging import get_logger\` then \`get_logger(service, module)\` in Python); or a new or modified Python process entrypoint (an \`if __name__ == "__main__":\` block or the \`main()\` it calls) does not call \`valors_logging.init_logging(service)\` once, or keeps a non-valors handler alongside it (\`logging.basicConfig(filename=...)\`, its own \`FileHandler\`/\`StreamHandler\`) — CRITICAL only when the repo's \`valors_logging\` exports \`init_logging\`, otherwise SUGGESTION (the fix must be importable); or any Python module sets \`propagate = False\` or attaches its own handlers to a stdlib logger (bypasses the root bridge); or a new production service/worker adds non-trivial logic with NO logging at all. Compliant in Python: \`get_logger(...)\`; \`get_stdlib_logger(service, module)\` (a stdlib Logger that emits valors JSON); and \`logging.getLogger(__name__)\` with \`log.<level>(...)\` (or root-logger calls such as \`logging.warning(...)\`) in library/worker modules, because their records reach valors through the root-logger bridge that the entrypoint's \`init_logging(service)\` installs — do NOT flag stdlib \`logging.getLogger(__name__)\` call sites on their own. Raw console/print output bypasses the JSON log schema that Vector ships to the observability pipeline, so production failures become invisible — this is a prod-observability gap, not a style nit. Prefer importing the valors logger and emitting structured events. Exempt: one-shot CLI/CI scripts (files under \`scripts/\` invoked via \`bun scripts/*.ts\` or a GitHub Actions \`run:\` step) whose stdout IS the log — these should use \`console.*\` because \`@valors/logging\` is not a dependency in that context and structured JSON reduces readability for human log consumers; flag only if \`@valors/logging\` is already imported in the same file. Python files under \`scripts/\` run by hand or once in CI are likewise exempt; Python scripts started by a systemd unit or timer are production entrypoints. Also exempt: the Companion app (files under \`companion/web/**\`), which has its OWN stacksniper-based structured logger — \`import { createLogger } from './logger.js'\` then \`createLogger(module)\`, emitting DuckDB-ready JSONL to \`~/.wilco/logs/\`. Treat \`createLogger(...)\` and \`log.debug|info|warn|error(...)\` in companion code as compliant structured logging; do NOT require \`@valors/logging\` there. Raw \`console.*\` / \`print\` in companion production code is STILL a finding.
 
 18. Response body decoded before a status check. HIGH when: code parses a response body (\`.json()\`, \`.text\`, decode) without first checking the status (\`res.ok\`, \`status < 400\`, \`raise_for_status()\`), so a 4xx/5xx error envelope is consumed as valid data; or treats an HTTP 2xx / exit-0 as proof of data without validating the payload/rows.
 
@@ -148,7 +159,9 @@ Evaluate the diff against the rules below. For ANY real violation visible in the
 
 26. Stale tests or fixtures for an intentional behavior change. HIGH when: the diff changes an output format, contract, enum, field set, or role/ARIA semantics but does not update the assertion sites, fixtures, or protocol examples in the same diff — leaving stale assertions that break CI or, worse, pass while asserting the old (now wrong) behavior. Distinct from rule 6 (missing tests for NEW code).
 
-27. Generated or derived artifact not regenerated after a schema change. HIGH when: the diff edits a source-of-truth schema (\`*.schema.json\`, a Pydantic discriminated union, an OpenAPI/JSON-Schema file) without regenerating the derived types/fixtures/examples in the same diff, or hand-edits a generated file without touching its generator/schema.`
+27. Generated or derived artifact not regenerated after a schema change. HIGH when: the diff edits a source-of-truth schema (\`*.schema.json\`, a Pydantic discriminated union, an OpenAPI/JSON-Schema file) without regenerating the derived types/fixtures/examples in the same diff, or hand-edits a generated file without touching its generator/schema.
+
+28. Uncited capability claim. HIGH when: a comment, docstring, rule/doc file, or PR body asserts that a capability does NOT exist, is unsupported, or is impossible on some path — e.g. "X has no effort concept", "the SDK does not support Y", "this can only be done via Z", "the review clamps the diff at N chars" — without citing what it was checked against (a \`file:line\` in a type definition or implementation, or a doc URL). A NEGATIVE capability claim is the dangerous direction: it reads as a settled design decision rather than an assertion, so reviewers and future authors accept it without re-checking. A wrong one silently deletes a feature, justifies a needless workaround, or ossifies a limitation that no longer exists. Also flag a claim whose only cited source is a follow-up issue, another comment, or a prior PR description rather than the authority itself. Fix: cite the authority inline, or soften the claim to what was actually observed — "we do not currently wire X" instead of "X does not exist".`
 
 /**
  * Standardized output schema description for all diff review prompts.
@@ -160,7 +173,10 @@ export const REVIEW_OUTPUT_SCHEMA = `Output ONLY a JSON object with a "findings"
 - "category": short category name (e.g. "security", "error-handling", "testing", "logging", "hardcoded-value", "dead-code", "config", "data-integrity")
 - "description": concise description of the issue
 - "suggested_fix": brief suggestion for how to fix it
-- "line_range": approximate line range from the diff (e.g. "+42-+55")`
+- "line_range": approximate line range from the diff (e.g. "+42-+55")
+- "rule_id": the engineering-rule number or a short slug this maps to (e.g. "rule-9"), when applicable
+- "evidence": the verbatim changed line(s) from the diff this finding is about, copied exactly (added or removed lines)
+- "failure_scenario": one concrete input/state that leads to the wrong outcome`
 
 // ── YAML loader ──────────────────────────────────────────────────────────────
 
@@ -236,9 +252,10 @@ Severity guide:
 - high: empty catch blocks (\`catch {}\`, \`.catch(() => {})\`, \`except: pass\`),
         errors swallowed without any logging at any level, missing input validation
         at system boundaries, no timeouts on network calls, hardcoded secrets/URLs,
-        client-trusted auth context, PR body missing or vague required sections
-        (## Summary, ## Changes, ## Test Plan, ## Operator Deploy Steps when
-        prod-touching, ## Expected Outcomes when non-trivial)
+        client-trusted auth context, PR body missing a conditionally-required
+        section (## Operator Deploy Steps when prod-touching, ## Expected Outcomes
+        when non-trivial) or with vague/unverifiable items (the always-required
+        ## Summary / ## Changes / ## Test Plan presence is checked in code, not here)
 - medium: missing tests for new code paths, magic numbers without named constants,
           missing error context (catch logs without the error object), N+1 query
           patterns. Do NOT down-rank an empty catch to medium just because it is

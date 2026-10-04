@@ -10,7 +10,8 @@
  * This helper POSTs an OpenAI-compatible streaming chat-completion and returns
  * the assembled visible content string (SSE `delta.content`). It IGNORES
  * `delta.reasoning_content` — that keeps the socket warm but is not part of the
- * model's answer. Fetch/timeout errors propagate to the caller (fail-closed).
+ * model's answer. Fetch/timeout errors propagate to the caller (fail-closed), and
+ * so does a `finish_reason: "length"` stream (content cut off at max_tokens).
  */
 export async function streamChatCompletion(opts: {
   endpoint: string
@@ -39,6 +40,19 @@ export async function streamChatCompletion(opts: {
   const decoder = new TextDecoder()
   let buffer = ''
   let content = ''
+  let finishReason: string | null = null
+
+  // A stream that stopped at max_tokens carries cut-off content. Returning it
+  // makes the caller fail later with a vague `JSON Parse error: Unterminated
+  // string` (CI run 37186455777, PR #808). Name the cause instead.
+  function result(): string {
+    if (finishReason === 'length') {
+      throw new Error(
+        `stream truncated: finish_reason=length (max_tokens reached after ${content.length} chars)`
+      )
+    }
+    return content
+  }
 
   // Process a single SSE `data:` line. Returns 'done' when [DONE] is seen so the
   // caller can stop; throws when the payload carries an error envelope.
@@ -50,7 +64,10 @@ export async function streamChatCompletion(opts: {
     try {
       const json = JSON.parse(payload) as {
         error?: unknown
-        choices?: Array<{ delta?: { content?: unknown; reasoning_content?: unknown } }>
+        choices?: Array<{
+          delta?: { content?: unknown; reasoning_content?: unknown }
+          finish_reason?: unknown
+        }>
       }
       // A 200 stream can still carry an error envelope mid-stream — surface it
       // instead of silently returning partial/empty content (fail-closed).
@@ -61,6 +78,8 @@ export async function streamChatCompletion(opts: {
       }
       const delta = json?.choices?.[0]?.delta?.content
       if (typeof delta === 'string') content += delta
+      const reason = json?.choices?.[0]?.finish_reason
+      if (typeof reason === 'string') finishReason = reason
     } catch (e) {
       // Re-throw our own error envelope; swallow only genuine parse failures.
       if (e instanceof Error && e.message.startsWith('stream API returned an error object')) {
@@ -79,14 +98,14 @@ export async function streamChatCompletion(opts: {
     buffer = lines.pop() ?? ''
 
     for (const rawLine of lines) {
-      if (handleLine(rawLine) === 'done') return content
+      if (handleLine(rawLine) === 'done') return result()
     }
   }
 
   // Flush any final buffered line that wasn't newline-terminated.
   if (buffer.length > 0) {
-    if (handleLine(buffer) === 'done') return content
+    if (handleLine(buffer) === 'done') return result()
   }
 
-  return content
+  return result()
 }
