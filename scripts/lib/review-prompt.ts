@@ -100,12 +100,18 @@ The finding's \`file\` field for these checks is the literal string \`PR_BODY\` 
 /**
  * Mandatory engineering rules, injected alongside PR_STRUCTURE_RULE into both
  * buildReviewPrompt() and FALLBACK_PROMPT. Encodes the team's most frequently
- * repeated review-finding categories so violations surface as HIGH severity
- * (which triggers REQUEST_CHANGES and blocks merge).
+ * repeated review-finding categories. Severity follows the impact rubric
+ * (review-gate-v2 P1b): a rule's "HIGH when" is its usual impact, not a floor,
+ * because labelling every violation HIGH made 82% of findings blocking.
  */
-export const ENGINEERING_RULES = `### Engineering rules (mandatory — flag violations as HIGH)
+export const ENGINEERING_RULES = `### Engineering rules (mandatory — severity by impact)
 
-Evaluate the diff against the rules below. For ANY real violation visible in the diff, emit a finding with severity "high" (or "critical" for an issue that can take down a shared service or cause data loss) citing the exact file and line — a HIGH finding triggers REQUEST_CHANGES and blocks the merge until fixed. These encode the team's most frequently-repeated review findings. IMPORTANT: only flag what the changed lines actually show; do not invent violations or flag a rule that does not apply to this diff.
+Evaluate the diff against the rules below. For ANY real violation visible in the diff, emit a finding citing the exact file and line. Set its severity by IMPACT, not by the rule's label:
+- critical: data loss, a security breach, or an outage of a shared service.
+- high: wrong behaviour on a path that a real input or state reaches. State that input or state in "failure_scenario".
+- medium: a latent defect — it needs an unusual state, or no reachable caller in the diff.
+- low: hygiene — style, naming, documentation.
+A rule's "HIGH when" names its usual impact. Downgrade when your failure_scenario is not reachable. Do not downgrade a security, data-loss, or silent-error-handling (rule 2) finding. A high or critical finding triggers REQUEST_CHANGES and blocks the merge until fixed, so it needs a concrete, reachable failure_scenario. These encode the team's most frequently-repeated review findings. IMPORTANT: only flag what the changed lines actually show; do not invent violations or flag a rule that does not apply to this diff.
 
 1. Unverified assumptions. HIGH when: code, comments, log lines, or messages assert a fact or number with no basis (e.g. throughput like "235 records/hour", "this is correct", "the migration is broken") as if verified; or a calculation uses unverified inputs but is stated as a precise result instead of an estimate.
 
@@ -117,13 +123,13 @@ Evaluate the diff against the rules below. For ANY real violation visible in the
 
 5. Security. HIGH when: TLS/host verification is disabled (\`NODE_TLS_REJECT_UNAUTHORIZED = '0'\`, \`verify=False\`, \`StrictHostKeyChecking=accept-new\`); SQL is built by string concatenation / f-string instead of a parameterized query; a new HTTP route/handler has no auth check; or credentials are read from an insecure location.
 
-6. Missing tests. HIGH when: a new script, module, or worker — or substantial new logic — is added with no corresponding test file or test case in the same diff.
+6. Missing tests. HIGH when: a new script, module, or worker — or substantial new logic with a reachable failure path — is added with no test of its behaviour in the same diff. Prefer an end-to-end test that runs the real entry point (script, CLI, hook, endpoint) over per-function unit tests: MEDIUM when the only new tests are unit tests of internals and the behaviour itself is never exercised.
 
 7. Production-path changes without a verification story. HIGH when: the diff touches deploy scripts, systemd units, CI workflows, DB schemas/migrations, scheduled jobs, or multi-tenant infra AND the \`## PR Body\` lacks concrete \`## Operator Deploy Steps\` and \`## Expected Outcomes\` containing at least one runnable post-deploy smoke/health command.
 
 8. Dead, duplicated, or truncated code. HIGH when: a logic block is duplicated verbatim (DRY violation); a file ends mid-statement or mid-comment (truncated edit); or code is plainly unreachable.
 
-9. Bash set -e safety. HIGH when: in a script using \`set -e\` / \`set -euo pipefail\`, an optional command (a \`grep\` that may match nothing, an optional tool) is invoked without \`|| true\` or an \`if\` guard.
+9. Bash set -e safety. HIGH when: in a script using \`set -e\` / \`set -euo pipefail\`, an optional command (a \`grep\` that may match nothing, an optional tool) runs as a standalone statement without \`|| true\` or an \`if\` guard; or a guard list (\`a && b\`) is the LAST command of a function or script, so its non-zero status propagates to the caller. Do NOT flag a command in an \`if\`/\`while\`/\`until\` condition or a non-final element of an \`&&\`/\`||\` list: \`set -e\` ignores failures there.
 
 10. Heavy query on a shared service pool. HIGH (CRITICAL if it can invalidate a shared connection/engine for other callers): the diff adds a \`COUNT(DISTINCT ...)\`, a full-table scan, a large window/dedup, or any unbounded aggregation to a SHARED, memory-constrained request path (an HTTP API handler, a shared DB/DuckDB connection pool). A query that fits when run alone can OOM under concurrency and break the service for everyone. Prefer isolating it in its own process with its own memory_limit, or precomputing into a small materialized table.
 
@@ -161,7 +167,11 @@ Evaluate the diff against the rules below. For ANY real violation visible in the
 
 27. Generated or derived artifact not regenerated after a schema change. HIGH when: the diff edits a source-of-truth schema (\`*.schema.json\`, a Pydantic discriminated union, an OpenAPI/JSON-Schema file) without regenerating the derived types/fixtures/examples in the same diff, or hand-edits a generated file without touching its generator/schema.
 
-28. Uncited capability claim. HIGH when: a comment, docstring, rule/doc file, or PR body asserts that a capability does NOT exist, is unsupported, or is impossible on some path — e.g. "X has no effort concept", "the SDK does not support Y", "this can only be done via Z", "the review clamps the diff at N chars" — without citing what it was checked against (a \`file:line\` in a type definition or implementation, or a doc URL). A NEGATIVE capability claim is the dangerous direction: it reads as a settled design decision rather than an assertion, so reviewers and future authors accept it without re-checking. A wrong one silently deletes a feature, justifies a needless workaround, or ossifies a limitation that no longer exists. Also flag a claim whose only cited source is a follow-up issue, another comment, or a prior PR description rather than the authority itself. Fix: cite the authority inline, or soften the claim to what was actually observed — "we do not currently wire X" instead of "X does not exist".`
+28. Uncited capability claim. HIGH when: a comment, docstring, rule/doc file, or PR body asserts that a capability does NOT exist, is unsupported, or is impossible on some path — e.g. "X has no effort concept", "the SDK does not support Y", "this can only be done via Z", "the review clamps the diff at N chars" — without citing what it was checked against (a \`file:line\` in a type definition or implementation, or a doc URL). A NEGATIVE capability claim is the dangerous direction: it reads as a settled design decision rather than an assertion, so reviewers and future authors accept it without re-checking. A wrong one silently deletes a feature, justifies a needless workaround, or ossifies a limitation that no longer exists. Also flag a claim whose only cited source is a follow-up issue, another comment, or a prior PR description rather than the authority itself. Fix: cite the authority inline, or soften the claim to what was actually observed — "we do not currently wire X" instead of "X does not exist".
+
+29. Documentation that explains how, not why. LOW (advisory): flag a comment, docstring, or doc only when a non-obvious decision or constraint has no stated reason, or when it restates what the code plainly does. Do NOT flag missing docstrings.
+
+30. Prose where a diagram belongs. LOW (advisory): a design doc or PR body that describes a flow of 3 or more linked parts (pipeline, state machine, call chain) in prose. Suggest a Mermaid diagram.`
 
 /**
  * Standardized output schema description for all diff review prompts.
@@ -247,9 +257,9 @@ ${ENGINEERING_RULES}
 
 ${REVIEW_OUTPUT_SCHEMA}
 
-Severity guide:
-- critical: credential exposure, SQL injection, auth bypass, data loss risk
-- high: empty catch blocks (\`catch {}\`, \`.catch(() => {})\`, \`except: pass\`),
+Severity guide (by impact — see the engineering-rules rubric):
+- critical: data loss, security breach (credential exposure, SQL injection, auth bypass), shared-service outage
+- high: wrong behaviour on a reachable path, e.g. empty catch blocks (\`catch {}\`, \`.catch(() => {})\`, \`except: pass\`),
         errors swallowed without any logging at any level, missing input validation
         at system boundaries, no timeouts on network calls, hardcoded secrets/URLs,
         client-trusted auth context, PR body missing a conditionally-required
@@ -260,7 +270,7 @@ Severity guide:
           missing error context (catch logs without the error object), N+1 query
           patterns. Do NOT down-rank an empty catch to medium just because it is
           "small" — silent error swallowing is always high.
-- low: style issues, minor documentation gaps
+- low: hygiene — style issues, naming, documentation that lacks a why
 - needs-verification: finding looks suspicious but evidence is inconclusive — reviewer should verify
 
 If the code looks clean, return: {"findings": []}

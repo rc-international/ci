@@ -740,6 +740,21 @@ function checkPrBodySections(prBody: string | undefined | null): ReviewFinding[]
 
 // ── Post PR review via GitHub CLI ───────────────────────────────────────────
 
+/**
+ * GitHub rejects APPROVE and REQUEST_CHANGES when the reviewer authored the PR
+ * (422 "Can not request changes on your own pull request" / "approve your own").
+ * The rc-international/ci sync PRs are opened by the same bot that reviews them.
+ */
+export function isOwnPrReviewError(err: unknown): boolean {
+  const e = err as { message?: string; stdout?: unknown; stderr?: unknown }
+  const text = `${e?.message ?? ''} ${String(e?.stdout ?? '')} ${String(e?.stderr ?? '')}`
+  return /your own pull request/i.test(text)
+}
+
+export function ownPrCommentBody(event: 'REQUEST_CHANGES' | 'APPROVE', body: string): string {
+  return `> Posted as a comment: GitHub does not let this bot ${event === 'APPROVE' ? 'approve' : 'request changes on'} its own pull request. Verdict: **${event}**.\n\n${body}`
+}
+
 async function postPrReview(
   prNumber: string,
   repo: string,
@@ -760,6 +775,30 @@ async function postPrReview(
     )
     console.log(`[ci-review] Posted PR review (${event}) to ${repo}#${prNumber}`)
   } catch (err) {
+    if (event !== 'COMMENT' && isOwnPrReviewError(err)) {
+      // Fall back to a COMMENT carrying the verdict. A REQUEST_CHANGES verdict still
+      // turns the check red (exitCode 1) so blocking findings stay visible.
+      try {
+        execFileSync(
+          'gh',
+          ['api', `repos/${repo}/pulls/${prNumber}/reviews`, '--method', 'POST', '--input', '-'],
+          {
+            encoding: 'utf-8',
+            timeout: 15_000,
+            input: JSON.stringify({ event: 'COMMENT', body: ownPrCommentBody(event, body) }),
+          }
+        )
+      } catch (fallbackErr) {
+        // Same contract as the rethrow below: an unposted review must fail the check.
+        console.error(
+          `[ci-review] Own-PR COMMENT fallback also failed for ${repo}#${prNumber} (verdict ${event}): ${(fallbackErr as Error)?.message || fallbackErr}`
+        )
+        throw fallbackErr
+      }
+      console.log(`[ci-review] Own PR: posted ${event} verdict as COMMENT to ${repo}#${prNumber}`)
+      if (event === 'REQUEST_CHANGES') process.exitCode = 1
+      return
+    }
     // Rethrow: an unposted review is a review that did not happen. The fatal
     // handler exits 1 so the required `code-review` check goes red instead of
     // green-with-no-review.
