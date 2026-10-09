@@ -46,6 +46,7 @@ type Fixture = Record<string, string>
 function fixture(over: Fixture = {}, files = 'modified scripts/ci-review.ts\nmodified scripts/lib/review-prompt.ts'): Fixture {
   return {
     'repos/rc-international/wilco/commits/aaaaaaa': WSHA,
+    [`repos/rc-international/wilco/compare/${WSHA}...main`]: 'ahead',
     [`repos/rc-international/wilco/contents/scripts/sync-ci.sh?ref=${WSHA}`]: Buffer.from(SYNC_SH).toString('base64'),
     'repos/rc-international/ci/pulls/7/files': files,
     [`repos/rc-international/ci/contents/scripts/ci-review.ts?ref=${HEAD}`]: 'blob1',
@@ -120,6 +121,16 @@ describe('verify-sync-pr.sh', () => {
     const r = await run(fixture(), 'chore: sync review scripts')
     expect(r.code).toBe(1)
     expect(r.err).toContain('does not name a wilco commit')
+  })
+
+  // WHY: a commit can exist on an unreviewed wilco branch; only code merged to
+  // main was reviewed (review gate fp:1288c419a4dd).
+  // Mutation: drop the compare check -> a 'diverged' commit is approved; fails.
+  test('refuses a wilco commit that is not on main', async () => {
+    const r = await run(fixture({ [`repos/rc-international/wilco/compare/${WSHA}...main`]: 'diverged' }))
+    expect(r.code).toBe(1)
+    expect(r.err).toContain('is not on main')
+    expect(r.posted).toBeNull()
   })
 
   test('refuses a wilco commit that does not exist', async () => {
