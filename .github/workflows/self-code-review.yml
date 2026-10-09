@@ -43,21 +43,25 @@ jobs:
     if: github.event_name == 'pull_request_target' && github.event.pull_request.user.login == 'dependabot[bot]'
     uses: ./.github/workflows/dependabot-approve.yml
     secrets: inherit
-  # `approved` comment on a PR the bot itself opened (the wilco -> ci sync PRs).
-  # GitHub does not let valors-release-bot approve its own PR, so the comment
-  # path above could only leave a COMMENT and a human had to submit a formal
-  # review by hand (ci#31, 2026-10-09). Here the HUMAN's comment is still the
-  # gate (same rule as ci-review.ts: trimmed, case-insensitive `approved`, from an
-  # OWNER/MEMBER); the approval is just recorded by github-actions[bot], a
-  # different identity. Nothing from the PR is checked out or executed.
+  # `approved <sha>` comment on a PR the bot itself opened (the wilco -> ci sync
+  # PRs). GitHub does not let valors-release-bot approve its own PR, so the
+  # comment path above could only leave a COMMENT and a human had to submit a
+  # formal review by hand (ci#31, 2026-10-09). The HUMAN's comment stays the
+  # gate (OWNER/MEMBER, same rule as ci-review.ts); github-actions[bot] only
+  # records it. The comment must name the head commit it approves
+  # (`approved <7+ hex>`): the job runs after the comment, and a push in between
+  # (e.g. the daily sync rebuild) must never be approved unseen. A bare
+  # `approved` gets a reply with the exact command. Only the sync branch from
+  # this repo qualifies. Nothing from the PR is checked out or executed.
   approve-bot-authored:
     if: ${{ github.event_name == 'issue_comment' && github.event.issue.pull_request && github.event.issue.user.login == 'valors-release-bot[bot]' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       pull-requests: write
+      issues: write # the reply comment when the head is not named
     steps:
-      - name: Approve on a trusted `approved` comment
+      - name: Approve on a trusted `approved <sha>` comment
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -68,16 +72,29 @@ jobs:
         run: |
           set -euo pipefail
           body=$(printf '%s' "$COMMENT_BODY" | tr '[:upper:]' '[:lower:]' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
-          if [ "$body" != approved ]; then
-            echo "Comment is not an approval; nothing to do."
-            exit 0
-          fi
+          case "$body" in
+            approved | "approved "*) ;;
+            *) echo "Comment is not an approval; nothing to do."; exit 0 ;;
+          esac
           case "$ASSOCIATION" in
             OWNER|MEMBER) ;;
             *) echo "::warning::'approved' from $COMMENT_AUTHOR ($ASSOCIATION) ignored: only OWNER/MEMBER may approve."; exit 0 ;;
           esac
-          head=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq .head.sha)
-          jq -n --arg sha "$head" --arg body "Approved on behalf of @$COMMENT_AUTHOR ($ASSOCIATION), who commented \`approved\`. Recorded by github-actions[bot] because valors-release-bot cannot approve its own PR." \
+          pr=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '[.head.sha, .head.ref, .head.repo.full_name] | @tsv')
+          IFS=$'\t' read -r head ref head_repo <<<"$pr"
+          if [ "$ref" != sync/wilco-ci-review ] || [ "$head_repo" != "$REPO" ]; then
+            echo "::warning::not the wilco sync branch of this repo ($head_repo:$ref); not approving."
+            exit 0
+          fi
+          want=$(printf '%s' "$body" | sed -nE 's/^approved ([0-9a-f]{7,40})$/\1/p')
+          if [ -z "$want" ] || [ "${head#"$want"}" = "$head" ]; then
+            msg="Not approved: to approve, comment \`approved ${head:0:12}\` (the current head). The commit is named so a push between your comment and this job can never be approved unseen."
+            if [ -n "$want" ]; then msg="Not approved: \`$want\` is not the current head (${head:0:12}); the PR changed. Review it, then comment \`approved ${head:0:12}\`."; fi
+            jq -n --arg body "$msg" '{body: $body}' | gh api "repos/$REPO/issues/$PR_NUMBER/comments" --method POST --input - >/dev/null
+            echo "$msg"
+            exit 0
+          fi
+          jq -n --arg sha "$head" --arg body "Approved on behalf of @$COMMENT_AUTHOR ($ASSOCIATION), who commented \`approved ${want}\`. Recorded by github-actions[bot] because valors-release-bot cannot approve its own PR." \
             '{event: "APPROVE", commit_id: $sha, body: $body}' |
             gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --method POST --input - >/dev/null
           echo "Approved PR #$PR_NUMBER at ${head:0:12} for $COMMENT_AUTHOR."
