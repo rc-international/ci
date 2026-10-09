@@ -18,6 +18,8 @@
  *   CI_REVIEW_FALLBACK_MODEL       — tried when the primary is overloaded/failing
  *                                    (default: deepseek-ai/DeepSeek-V4-Pro; '' disables)
  *   CI_REVIEW_ENDPOINT             — endpoint override (default: DeepInfra chat/completions)
+ *   CI_REVIEW_BOT_LOGIN            — login of the reviewing bot, to find its prior reviews
+ *                                    (default: valors-release-bot; a `[bot]` suffix is ignored)
  *   CI_REVIEW_REASONING_EFFORT     — GLM reasoning effort (default: none — GLM-5.2 "thinking" adds ~5min; none returns in ~11s)
  */
 
@@ -26,6 +28,17 @@ import { existsSync, readFileSync } from 'node:fs'
 import type { Nodes, Root } from 'mdast'
 import { fromMarkdown } from 'mdast-util-from-markdown'
 import { toString as mdastToString } from 'mdast-util-to-string'
+import {
+  applyPostModelFilters,
+  buildRebuttalContext,
+  computeCacheKey,
+  encodeCacheMarker,
+  type PrCommentRecord,
+  type PrReviewRecord,
+  parseChangedLines,
+  reviewWithCache,
+  sanitizeFindingForBody,
+} from './lib/ci-review-determinism.js'
 import { type CommitAuthor, checkCommitAuthors } from './lib/commit-author-guard.js'
 import { computeImpactScore, formatImpactScore, type ImpactScore } from './lib/impact-score.js'
 import {
@@ -97,6 +110,17 @@ export function retryDelayMs(
 export function reviewModels(primary: string, fallback: string): string[] {
   return fallback && fallback !== primary ? [primary, fallback] : [primary]
 }
+// Who authored the PR reviews that carry the verdict-cache marker. GitHub reports
+// the App as `valors-release-bot[bot]` (verified via the reviews API 2026-10-09);
+// sameLogin() ignores the suffix. Only this author's markers are trusted.
+const BOT_LOGIN = process.env.CI_REVIEW_BOT_LOGIN || 'valors-release-bot'
+// Deterministic sampling: reruns on the same input must not re-roll findings
+// (menu-expert#408 raised a new false HIGH per round at temperature 0.2).
+// DeepInfra returned HTTP 200 for temperature 0 + seed 0 on both review models
+// (probed 2026-10-09); whether the seed is honoured is not verifiable from the
+// response, so the verdict cache — not the seed — is the real guarantee.
+const REVIEW_TEMPERATURE = 0
+const REVIEW_SEED = 0
 const APPROVAL_COMMENT = 'approved'
 const TRUSTED_APPROVAL_ASSOCIATIONS = new Set(['OWNER', 'MEMBER'])
 
@@ -196,7 +220,7 @@ function extractChangedFiles(rawDiff: string): string[] {
   return [...files]
 }
 
-function buildFileContext(changedFiles: string[]): string {
+function buildFileContext(changedFiles: string[], fullContents?: Map<string, string>): string {
   const sections: string[] = []
   const budgetPerFile = BUDGET_PER_FILE
   // Cap total file context so the diff always keeps at least MIN_DIFF_BUDGET_CHARS.
@@ -212,6 +236,7 @@ function buildFileContext(changedFiles: string[]): string {
         timeout: 5_000,
         maxBuffer: 1024 * 1024,
       })
+      fullContents?.set(filePath, content)
       const truncated =
         content.length > budgetPerFile
           ? `${content.slice(0, budgetPerFile)}\n... (truncated)`
@@ -231,7 +256,12 @@ function buildFileContext(changedFiles: string[]): string {
 
 const REVIEW_PROMPT = buildReviewPrompt()
 
-function buildUserMessage(diff: string, fileContext: string, prBody = ''): string {
+function buildUserMessage(
+  diff: string,
+  fileContext: string,
+  prBody = '',
+  rebuttalContext = ''
+): string {
   const parts: string[] = []
 
   if (prBody) {
@@ -254,6 +284,11 @@ function buildUserMessage(diff: string, fileContext: string, prBody = ''): strin
     parts.push('\n\n... (diff truncated)')
   } else {
     parts.push(diff)
+  }
+
+  if (rebuttalContext) {
+    parts.push('\n\n')
+    parts.push(rebuttalContext)
   }
 
   return parts.join('')
@@ -288,6 +323,8 @@ interface CallReviewOptions {
   models?: string[]
   /** Injectable for tests so backoff waits don't run in real time. */
   sleep?: (ms: number) => Promise<void>
+  /** "Previously rebutted on this PR" section appended to the user message. */
+  rebuttalContext?: string
 }
 
 async function callReviewModel(
@@ -301,7 +338,16 @@ async function callReviewModel(
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)))
   for (const [i, model] of models.entries()) {
     const hasFallback = i < models.length - 1
-    const result = await callOneModel(apiKey, model, diff, fileContext, prBody, hasFallback, sleep)
+    const result = await callOneModel(
+      apiKey,
+      model,
+      diff,
+      fileContext,
+      prBody,
+      hasFallback,
+      sleep,
+      opts.rebuttalContext ?? ''
+    )
     if (!result.apiError) {
       if (i > 0) console.warn(`[ci-review] Review served by fallback model ${model}.`)
       return result
@@ -320,7 +366,8 @@ async function callOneModel(
   fileContext: string,
   prBody: string,
   hasFallback: boolean,
-  sleep: (ms: number) => Promise<void>
+  sleep: (ms: number) => Promise<void>,
+  rebuttalContext = ''
 ): Promise<ReviewResult> {
   for (let attempt = 0; ; attempt++) {
     try {
@@ -335,10 +382,11 @@ async function callOneModel(
           messages: [
             {
               role: 'user',
-              content: `${REVIEW_PROMPT}\n\n${buildUserMessage(diff, fileContext, prBody)}`,
+              content: `${REVIEW_PROMPT}\n\n${buildUserMessage(diff, fileContext, prBody, rebuttalContext)}`,
             },
           ],
-          temperature: 0.2,
+          temperature: REVIEW_TEMPERATURE,
+          seed: REVIEW_SEED,
           max_tokens: 16384,
           reasoning_effort: CI_REVIEW_REASONING,
           response_format: { type: 'json_object' },
@@ -387,6 +435,47 @@ async function callOneModel(
   }
 }
 
+/**
+ * Post-model filters over the model's findings. Scope is judged against the RAW
+ * diff (all files): the 400KB cleanDiff slice omits files past the cut, which
+ * would otherwise make every finding on them look "out of diff".
+ */
+function filterModelFindings(
+  findings: ReviewFinding[],
+  rawDiff: string,
+  diffInfo: Pick<DiffInfo, 'wasTruncated'>,
+  fileContents: Map<string, string>
+): ReviewFinding[] {
+  return applyPostModelFilters(findings, {
+    changedLines: parseChangedLines(rawDiff),
+    fileContents,
+    truncated: diffInfo.wasTruncated,
+    rawDiff,
+  }).kept
+}
+
+/**
+ * Verdict-cache key. Takes the RAW diff (all files), never the size-capped copy
+ * the model sees: two PRs that differ only past the 400KB cut are different reviews.
+ */
+function reviewCacheKey(
+  rawDiff: string,
+  models: string[],
+  fileContext: string,
+  prBody: string,
+  rebuttalContext = ''
+): string {
+  return computeCacheKey({
+    diff: rawDiff,
+    prompt: REVIEW_PROMPT,
+    models,
+    fileContext,
+    reasoning: CI_REVIEW_REASONING,
+    prBody,
+    rebuttalContext,
+  })
+}
+
 // ── Review formatting ───────────────────────────────────────────────────────
 
 function reviewEvent(findings: ReviewFinding[]): 'REQUEST_CHANGES' | 'COMMENT' | 'APPROVE' {
@@ -415,10 +504,30 @@ interface FormatOptions {
   impactScore?: ImpactScore
   /** Set when the fallback model served the review, so readers know. */
   fallbackModel?: string
+  /** Hidden verdict-cache marker (see encodeCacheMarker); appended last. */
+  cacheMarker?: string | null
 }
 
-function formatReviewBody(findings: ReviewFinding[], opts: FormatOptions): string {
+const GITHUB_BODY_LIMIT = 65_000 // GitHub's hard cap is 65,536; keep headroom.
+
+function formatReviewBody(rawFindings: ReviewFinding[], opts: FormatOptions): string {
+  // Model/PR text must never open or close an HTML comment: a quoted cache
+  // marker would otherwise be readable as a verdict.
+  const findings = rawFindings.map(sanitizeFindingForBody)
   const lines: string[] = []
+  const finish = (): string => {
+    const body = lines.join('\n')
+    if (!opts.cacheMarker) return body
+    // GitHub rejects review bodies over 65,536 chars; a too-large marker would
+    // fail every post. Skip caching for that run instead (fail-safe).
+    if (body.length + opts.cacheMarker.length + 2 > GITHUB_BODY_LIMIT) {
+      console.warn(
+        '[ci-review] Review body + cache marker exceed the GitHub limit; verdict not cached.'
+      )
+      return body
+    }
+    return `${body}\n\n${opts.cacheMarker}`
+  }
   lines.push('## Automated Code Review')
   lines.push('')
   lines.push('> This review was generated by the wilco CI code review pipeline.')
@@ -444,7 +553,7 @@ function formatReviewBody(findings: ReviewFinding[], opts: FormatOptions): strin
       lines.push('')
       lines.push(formatImpactScore(opts.impactScore))
     }
-    return lines.join('\n')
+    return finish()
   }
 
   // Severity counts
@@ -498,7 +607,7 @@ function formatReviewBody(findings: ReviewFinding[], opts: FormatOptions): strin
     lines.push(formatImpactScore(opts.impactScore))
   }
 
-  return lines.join('\n')
+  return finish()
 }
 
 // ── Get PR commit messages ──────────────────────────────────────────────────
@@ -738,6 +847,66 @@ function checkPrBodySections(prBody: string | undefined | null): ReviewFinding[]
   return findings
 }
 
+// ── Prior PR reviews + comments (verdict cache, rebuttal memory) ─────────────
+
+/** GET a paginated list endpoint; one JSON object per line via jq. Throws on failure. */
+function ghApiList(endpoint: string, jq: string): Record<string, unknown>[] {
+  const raw = execFileSync(
+    'gh',
+    ['api', `${endpoint}?per_page=100`, '--paginate', '--jq', `.[] | ${jq} | tojson`],
+    { encoding: 'utf-8', timeout: 20_000, maxBuffer: 20 * 1024 * 1024 }
+  )
+  return raw
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as Record<string, unknown>)
+}
+
+function fetchPrReviews(repo: string, prNumber: string): PrReviewRecord[] {
+  return ghApiList(
+    `repos/${repo}/pulls/${prNumber}/reviews`,
+    '{id, login: .user.login, type: .user.type, state, body, submittedAt: .submitted_at}'
+  ).map((r) => ({
+    id: Number(r.id),
+    login: String(r.login ?? ''),
+    type: r.type ? String(r.type) : undefined,
+    state: String(r.state ?? ''),
+    body: String(r.body ?? ''),
+    submittedAt: r.submittedAt ? String(r.submittedAt) : undefined,
+  }))
+}
+
+function fetchPrComments(repo: string, prNumber: string): PrCommentRecord[] {
+  return ghApiList(
+    `repos/${repo}/issues/${prNumber}/comments`,
+    '{login: .user.login, association: .author_association, body, createdAt: .created_at}'
+  ).map((c) => ({
+    login: String(c.login ?? ''),
+    association: String(c.association ?? ''),
+    body: String(c.body ?? ''),
+    createdAt: c.createdAt ? String(c.createdAt) : undefined,
+  }))
+}
+
+/**
+ * Rebuttal memory for the model prompt. Fail-safe: a GitHub API failure logs a
+ * warning and returns '' so the review proceeds without memory.
+ */
+function loadRebuttalContext(repo: string, prNumber: string, reviews?: PrReviewRecord[]): string {
+  try {
+    return buildRebuttalContext(
+      fetchPrComments(repo, prNumber),
+      reviews ?? fetchPrReviews(repo, prNumber),
+      { botLogin: BOT_LOGIN, isTrustedAssociation: isTrustedApprovalAssociation }
+    )
+  } catch (err) {
+    console.warn(
+      `[ci-review] Rebuttal context fetch failed for ${repo}#${prNumber}; reviewing without it: ${err instanceof Error ? err.message : String(err)}`
+    )
+    return ''
+  }
+}
+
 // ── Post PR review via GitHub CLI ───────────────────────────────────────────
 
 /**
@@ -950,11 +1119,52 @@ async function main(): Promise<void> {
 
   // Build full file context for changed files
   const changedFiles = extractChangedFiles(rawDiff)
-  const fileContext = buildFileContext(changedFiles)
+  const fileContents = new Map<string, string>()
+  const fileContext = buildFileContext(changedFiles, fileContents)
   console.log(
     `[ci-review] Reviewing ${diffInfo.fileCount} files (${changedFiles.length} with full context, ${Math.round(fileContext.length / 1000)}KB)...`
   )
-  const result = await callReviewModel(apiKey, diffInfo.cleanDiff, fileContext, prBody)
+
+  // Verdict reuse: the PR's own prior bot reviews are the cache, keyed by
+  // sha256(diff, prompt, models, file context, PR body, rebuttal memory).
+  // Same key => same findings, no model call. A DISMISSED same-key review is
+  // a bypass (the model re-runs with it as rebuttal context). A NEW maintainer
+  // rebuttal changes the key, so it is always read by a fresh review.
+  // Lookup failures fall through to a normal model review.
+  const models = reviewModels(REVIEW_MODEL, FALLBACK_MODEL)
+  let priorReviews: PrReviewRecord[] | undefined
+  try {
+    priorReviews = fetchPrReviews(repo, prNumber)
+  } catch (err) {
+    console.warn(
+      `[ci-review] Prior-review lookup failed; reviewing without cache: ${(err as Error)?.message || err}`
+    )
+  }
+  const rebuttalContext = loadRebuttalContext(repo, prNumber, priorReviews)
+  if (rebuttalContext) {
+    console.log(`[ci-review] Rebuttal memory: ${rebuttalContext.length} chars added to prompt.`)
+  }
+  const cacheKey = reviewCacheKey(rawDiff, models, fileContext, prBody, rebuttalContext)
+  const { result, source } = await reviewWithCache<ReviewResult>({
+    sha: cacheKey,
+    botLogin: BOT_LOGIN,
+    loadReviews: () => {
+      if (!priorReviews) throw new Error('prior reviews unavailable')
+      return priorReviews
+    },
+    callModel: async () => {
+      const fresh = await callReviewModel(apiKey, diffInfo.cleanDiff, fileContext, prBody, {
+        models,
+        rebuttalContext,
+      })
+      if (fresh.apiError) return fresh
+      // Deterministic post-model filters: drop what the diff/files disprove.
+      return {
+        ...fresh,
+        findings: filterModelFindings(fresh.findings, rawDiff, diffInfo, fileContents),
+      }
+    },
+  })
 
   if (result.apiError) {
     console.warn('[ci-review] review API failed. Posting skip notice.')
@@ -987,6 +1197,13 @@ async function main(): Promise<void> {
   // Merge the deterministic author + PR-body findings with the LLM findings so
   // they participate in severity counting and REQUEST_CHANGES escalation.
   const findings = [...deterministicFindings, ...result.findings]
+  // Only the (filtered) model findings go in the marker; deterministic findings
+  // are recomputed on every run.
+  const cacheMarker = encodeCacheMarker(cacheKey, result.findings)
+  if (!cacheMarker) {
+    console.warn('[ci-review] Cache marker too large for a review body; verdict not cached.')
+  }
+  console.log(`[ci-review] Verdict source: ${source}`)
 
   // Compute impact score (non-blocking: failures don't affect review)
   let impactScore: ImpactScore | undefined
@@ -1003,7 +1220,8 @@ async function main(): Promise<void> {
     wasTruncated: diffInfo.wasTruncated,
     fileCount: diffInfo.fileCount,
     impactScore,
-    fallbackModel: result.model !== REVIEW_MODEL ? result.model : undefined,
+    fallbackModel: result.model && result.model !== REVIEW_MODEL ? result.model : undefined,
+    cacheMarker,
   })
 
   await postPrReview(prNumber, repo, event, body)
@@ -1037,6 +1255,13 @@ export {
   isApprovedComment,
   isTrustedApprovalAssociation,
   parseDiff,
+  extractChangedFiles,
+  buildFileContext,
+  fetchPrReviews,
+  fetchPrComments,
+  loadRebuttalContext,
+  filterModelFindings,
+  reviewCacheKey,
   formatReviewBody,
   reviewEvent,
   reviewOutcomeWithoutModel,
