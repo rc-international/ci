@@ -46,6 +46,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           REPO: ${{ github.repository }}
           WILCO_REPO: ${{ github.repository_owner }}/wilco
           READ_TOKEN: ${{ steps.app-token.outputs.token }}
