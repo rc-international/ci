@@ -8,7 +8,8 @@
 # a second human review of a byte-identical copy adds nothing.
 #
 # Approves ONLY when all of these hold, else exits 1 with the reason:
-#   - the PR title names a wilco commit ("... from wilco <sha>") that exists;
+#   - the PR title names a wilco commit ("... from wilco <sha>") that is on
+#     wilco main (an ancestor of main: merged through review, not a branch);
 #   - every changed file is a destination in that commit's scripts/sync-ci.sh
 #     `publish <wilco path> <ci path>` lines (the sync's own source of truth);
 #   - no file is removed or renamed;
@@ -35,6 +36,14 @@ short=$(printf '%s' "$PR_TITLE" | sed -nE 's/.*from wilco ([0-9a-f]{7,40})\b.*/\
 wsha=$(GH_TOKEN=$READ_TOKEN gh api "repos/$WILCO_REPO/commits/$short" --jq .sha) ||
     fail "wilco commit $short not found"
 [[ "$wsha" =~ ^[0-9a-f]{40}$ ]] || fail "bad wilco sha for $short: $wsha"
+
+# Reviewed code only: the commit must be on wilco main (merged through review),
+# not merely exist on some branch. compare/<sha>...main is "identical" or
+# "ahead" exactly when <sha> is an ancestor of main.
+rel=$(GH_TOKEN=$READ_TOKEN gh api "repos/$WILCO_REPO/compare/$wsha...main" --jq .status) ||
+    fail "cannot compare wilco ${wsha:0:12} with main"
+[[ "$rel" == identical || "$rel" == ahead ]] ||
+    fail "wilco ${wsha:0:12} is not on main (compare status: $rel)"
 
 # Destination -> source map from the sync script at that exact commit.
 sync_sh=$(GH_TOKEN=$READ_TOKEN gh api "repos/$WILCO_REPO/contents/scripts/sync-ci.sh?ref=$wsha" \
