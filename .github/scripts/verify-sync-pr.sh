@@ -59,6 +59,10 @@ done <<<"$sync_sh"
 files=$(GH_TOKEN=$READ_TOKEN gh api "repos/$REPO/compare/$BASE_SHA...$HEAD_SHA" \
     --jq '.files[] | "\(.status) \(.filename)"') || fail "cannot list changed files"
 [[ -n "$files" ]] || fail "PR changes no files"
+# The compare API truncates very large file lists; a sync PR touches a
+# handful of files. Refuse anything big rather than verify a partial list.
+nfiles=$(printf '%s\n' "$files" | wc -l)
+((nfiles <= 50)) || fail "$nfiles changed files: too many for a sync PR (compare list may be truncated)"
 
 n=0
 while read -r status path; do
