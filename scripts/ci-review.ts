@@ -498,6 +498,49 @@ function reviewOutcomeWithoutModel(
   return deterministicFindings.length > 0 ? 'REQUEST_CHANGES' : 'COMMENT'
 }
 
+/**
+ * Event + body for a completed model review. A review served by the FALLBACK model
+ * is advisory: its model findings are listed but cannot REQUEST_CHANGES (COMMENT
+ * instead), and it carries no cache marker so the next run asks the primary model
+ * again rather than reusing weaker findings as a primary verdict. Deterministic
+ * findings (commit author, PR body) do not depend on the model and keep their
+ * verdict either way. A prior primary APPROVE / CHANGES_REQUESTED is never touched:
+ * a COMMENT review does not replace either on GitHub, and this script dismisses
+ * nothing. `servedModel` undefined (verdict reused from a prior primary review) is
+ * treated as primary.
+ */
+function composeReview(input: {
+  deterministic: ReviewFinding[]
+  model: ReviewFinding[]
+  servedModel?: string
+  cacheMarker: string | null
+  wasTruncated: boolean
+  fileCount: number
+  impactScore?: ImpactScore
+}): { event: 'REQUEST_CHANGES' | 'COMMENT' | 'APPROVE'; body: string; failCheck: boolean } {
+  const fallbackModel =
+    input.servedModel && input.servedModel !== REVIEW_MODEL ? input.servedModel : undefined
+  const findings = [...input.deterministic, ...input.model]
+  let event = reviewEvent(findings)
+  // A fallback review never APPROVEs either: a weaker model's clean pass must not
+  // replace a prior primary CHANGES_REQUESTED on GitHub.
+  if (fallbackModel && reviewEvent(input.deterministic) !== 'REQUEST_CHANGES') {
+    event = 'COMMENT'
+  }
+  const body = formatReviewBody(findings, {
+    wasTruncated: input.wasTruncated,
+    fileCount: input.fileCount,
+    impactScore: input.impactScore,
+    fallbackModel,
+    cacheMarker: fallbackModel ? null : input.cacheMarker,
+  })
+  // Branch protection needs an approving review; a fallback COMMENT cannot supply
+  // one, so with blocking-grade LLM findings the PR would stall silently. Turn the
+  // code-review check red so the author sees it (zero findings stays green).
+  const failCheck = Boolean(fallbackModel) && reviewEvent(input.model) === 'REQUEST_CHANGES'
+  return { event, body, failCheck }
+}
+
 interface FormatOptions {
   wasTruncated: boolean
   fileCount: number
@@ -536,6 +579,9 @@ function formatReviewBody(rawFindings: ReviewFinding[], opts: FormatOptions): st
   if (opts.fallbackModel) {
     lines.push(
       `> **Note:** Primary model ${REVIEW_MODEL} was unavailable; reviewed by fallback ${opts.fallbackModel}.`
+    )
+    lines.push(
+      `> The fallback review is advisory: it posts a COMMENT and cannot approve, so it does not satisfy the required approving review. To get a primary-model re-review, push a new commit or close and reopen the PR (an issue comment does not re-run the review). An ${[...TRUSTED_APPROVAL_ASSOCIATIONS].join('/').toLowerCase()} of the org can instead approve manually by commenting \`${APPROVAL_COMMENT}\`.`
     )
     lines.push('')
   }
@@ -1215,16 +1261,22 @@ async function main(): Promise<void> {
     console.warn(`[ci-review] Impact score computation failed: ${(err as Error)?.message || err}`)
   }
 
-  const event = reviewEvent(findings)
-  const body = formatReviewBody(findings, {
+  const { event, body, failCheck } = composeReview({
+    deterministic: deterministicFindings,
+    model: result.findings,
+    servedModel: result.model,
+    cacheMarker,
     wasTruncated: diffInfo.wasTruncated,
     fileCount: diffInfo.fileCount,
     impactScore,
-    fallbackModel: result.model && result.model !== REVIEW_MODEL ? result.model : undefined,
-    cacheMarker,
   })
 
   await postPrReview(prNumber, repo, event, body)
+  if (failCheck) {
+    console.error(
+      '[ci-review] Fallback model served this review with high/critical findings: posted COMMENT (cannot approve); failing the check so the author sees it.'
+    )
+  }
 
   // Log summary
   const logCounts: Record<string, number> = {
@@ -1241,13 +1293,15 @@ async function main(): Promise<void> {
     `[ci-review] Review complete: ${findings.length} findings (critical=${logCounts.critical}, high=${logCounts.high}, medium=${logCounts.medium}, low=${logCounts.low}, needs-verification=${logCounts['needs-verification']})`
   )
 
-  // Don't fail the workflow — the PR review itself communicates the findings
-  process.exit(0)
+  // The PR review itself communicates the findings; only a fallback-served review
+  // with blocking-grade findings fails the check (see composeReview).
+  process.exit(failCheck ? 1 : 0)
 }
 
 // ── Exports for testing ─────────────────────────────────────────────────────
 
 export {
+  composeReview,
   buildReviewPrompt,
   buildUserMessage,
   callReviewModel,
