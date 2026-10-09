@@ -16,13 +16,13 @@
 #   - each changed file's blob at the PR head equals the wilco blob at that
 #     commit (git blob SHA = content hash, so equal SHA = byte-identical).
 #
-# Env: PR_NUMBER, PR_TITLE, HEAD_SHA, REPO (owner/ci), WILCO_REPO,
+# Env: PR_NUMBER, PR_TITLE, HEAD_SHA, BASE_SHA, REPO (owner/ci), WILCO_REPO,
 #      READ_TOKEN (can read wilco + ci), APPROVE_TOKEN (GITHUB_TOKEN).
 #      DRY_RUN=1 verifies and reports without posting the approval.
 # PR text arrives only through env, never interpolated into this script.
 set -euo pipefail
 
-: "${PR_NUMBER:?}" "${PR_TITLE:?}" "${HEAD_SHA:?}" "${REPO:?}" "${WILCO_REPO:?}"
+: "${PR_NUMBER:?}" "${PR_TITLE:?}" "${HEAD_SHA:?}" "${BASE_SHA:?}" "${REPO:?}" "${WILCO_REPO:?}"
 : "${READ_TOKEN:?}" "${APPROVE_TOKEN:?}"
 
 fail() {
@@ -54,8 +54,10 @@ while read -r kw from to; do
 done <<<"$sync_sh"
 ((${#SRC[@]} > 0)) || fail "no publish lines in scripts/sync-ci.sh at $wsha"
 
-files=$(GH_TOKEN=$READ_TOKEN gh api "repos/$REPO/pulls/$PR_NUMBER/files" --paginate \
-    --jq '.[] | "\(.status) \(.filename)"') || fail "cannot list PR files"
+# File list at the PINNED commits (base...head), not the live PR: a push
+# after this event must not change what was verified versus what is approved.
+files=$(GH_TOKEN=$READ_TOKEN gh api "repos/$REPO/compare/$BASE_SHA...$HEAD_SHA" \
+    --jq '.files[] | "\(.status) \(.filename)"') || fail "cannot list changed files"
 [[ -n "$files" ]] || fail "PR changes no files"
 
 n=0

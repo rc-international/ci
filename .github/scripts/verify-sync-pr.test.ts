@@ -13,6 +13,7 @@ import { join } from 'node:path'
 const SCRIPT = join(import.meta.dir, 'verify-sync-pr.sh')
 const WSHA = 'a'.repeat(40)
 const HEAD = 'b'.repeat(40)
+const BASE = 'c'.repeat(40)
 const SYNC_SH = [
   'publish() { git -C "$WILCO_DIR" show "$SRC_REF:$1" > "$CI_REPO_DIR/$2"; }',
   'publish scripts/ci-review.ts scripts/ci-review.ts',
@@ -48,7 +49,7 @@ function fixture(over: Fixture = {}, files = 'modified scripts/ci-review.ts\nmod
     'repos/rc-international/wilco/commits/aaaaaaa': WSHA,
     [`repos/rc-international/wilco/compare/${WSHA}...main`]: 'ahead',
     [`repos/rc-international/wilco/contents/scripts/sync-ci.sh?ref=${WSHA}`]: Buffer.from(SYNC_SH).toString('base64'),
-    'repos/rc-international/ci/pulls/7/files': files,
+    [`repos/rc-international/ci/compare/${BASE}...${HEAD}`]: files,
     [`repos/rc-international/ci/contents/scripts/ci-review.ts?ref=${HEAD}`]: 'blob1',
     [`repos/rc-international/wilco/contents/scripts/ci-review.ts?ref=${WSHA}`]: 'blob1',
     [`repos/rc-international/ci/contents/scripts/lib/review-prompt.ts?ref=${HEAD}`]: 'blob2',
@@ -70,6 +71,7 @@ async function run(fix: Fixture, title = 'chore(ci-review): sync review scripts 
       PR_NUMBER: '7',
       PR_TITLE: title,
       HEAD_SHA: HEAD,
+      BASE_SHA: BASE,
       REPO: 'rc-international/ci',
       WILCO_REPO: 'rc-international/wilco',
       READ_TOKEN: 'r',
