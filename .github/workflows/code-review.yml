@@ -97,6 +97,12 @@ jobs:
           app-id: ${{ secrets.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
+          # Scope the token to the two repos this job touches: the calling repo
+          # (diff, PR body, reviews) and ci (the review scripts checked out
+          # below). Unscoped, every repo's review run held a token valid across
+          # the whole org, e.g. able to open PRs in ci as valors-release-bot
+          # (ci#33). In ci itself the two names are the same repo.
+          repositories: ${{ github.event.repository.name == 'ci' && 'ci' || format('{0},ci', github.event.repository.name) }}
 
       - name: Checkout calling repo
         if: github.event.pull_request.user.login != 'dependabot[bot]'
