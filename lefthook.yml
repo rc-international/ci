@@ -1,0 +1,237 @@
+# Lefthook config for rc-international/ci (TypeScript/bun, no package.json).
+# Ported from wilco lefthook.yml and the valors-mobile TypeScript template, then
+# trimmed to the tooling this repo really has: biome.json, bun test, GitHub workflows.
+#
+# Install the hooks with `lefthook install`.
+#
+# SCOPE OF ENFORCEMENT: client-side only. `--no-verify`, `LEFTHOOK=0` or a clone
+# without `lefthook install` bypass every check below. Treat the gates as a guard
+# against mistakes, not against a determined bypass.
+#
+# OFFLINE PUSHES: `divergence-guard` and `rebase-freshness-guard` fetch live and fail
+# closed. Sanctioned escape for a genuinely offline push: `LEFTHOOK=0 git push`.
+#
+# Deliberately NOT included (each fails on current main; follow-ups, see the PR that
+# added this file):
+#   biome lint     - scripts/lib/impact-score.ts has 1 lint error
+#                    (lint/suspicious/noAssignInExpressions). Format and import order are
+#                    enforced below (and auto-fixed); turn the linter on once that is fixed.
+#   typos          - 9 hits on main (`unparseable` in 5 source files, a deliberate typo in
+#                    the comment-typo-fix eval fixture). Needs a reviewed _typos.toml.
+#   typecheck      - the repo has no tsconfig.json and no package.json, so there is nothing
+#                    for `tsc` to check. Add both, then add a pre-push typecheck.
+#   scripts/ci-review.test.ts - cannot load: it imports mdast-util-from-markdown, which
+#                    no manifest declares (the review workflow installs it ad hoc). Added to
+#                    pre-push tests once a package.json declares it.
+#   security-audit / semgrep - out of scope for this change; no manifest to audit.
+
+pre-commit:
+  parallel: true
+  commands:
+    main-branch-guard:
+      run: |
+        BRANCH=$(git branch --show-current)
+        # Fail closed on detached HEAD. `git branch --show-current` prints
+        # NOTHING when HEAD is detached, so both comparisons below are false
+        # and the guard waves the commit through — verified: a worktree
+        # detached at origin/main's exact commit reports an empty branch name
+        # and passes. The commit then sits unreferenced until someone runs
+        # `git push origin HEAD:main`, which lands on main having never met
+        # this guard. "Cannot determine the branch" is not "not on main".
+        if [ -z "$BRANCH" ]; then
+          echo "ERROR: HEAD is detached — cannot verify this commit is not on $BRANCH." >&2
+          echo "  Commits made here are unreferenced and can be pushed straight to main." >&2
+          echo "  Fix: git switch -c feat/my-change" >&2
+          # An interactive rebase also detaches HEAD, and `git rebase -i` with
+          # `edit`/`reword` steps commits from that state — so the single most
+          # likely reader of this message is mid-rebase and does NOT want a new
+          # branch. Say so here rather than leaving them to guess, since the
+          # advice above is actively wrong for them.
+          echo "  If you are mid-rebase, this is expected: git rebase --continue" >&2
+          exit 1
+        fi
+        if [ "$BRANCH" = "main" ] || [ "$BRANCH" = "master" ]; then
+          echo "ERROR: Direct commits to $BRANCH are not allowed."
+          echo "Create a feature branch: git checkout -b feat/my-change"
+          exit 1
+        fi
+    worktree-branch-guard:
+      run: |
+        TOPLEVEL=$(git rev-parse --show-toplevel)
+        CURRENT=$(git branch --show-current)
+        # Fail closed, and no pipe into the loop. The old form was
+        # `git worktree list 2>/dev/null | awk ... | while ...`, which had two
+        # holes of the same class this branch targets: `2>/dev/null` turned a
+        # git failure into an empty list that the loop silently accepted, and
+        # the `while` ran in a pipeline subshell, so its `exit 1` only
+        # propagated by luck — this happens to be the block's last command.
+        # Append anything below and the guard stops guarding.
+        if ! WORKTREES=$(git worktree list --porcelain); then
+          echo "ERROR: cannot list worktrees — branch ownership is unverifiable." >&2
+          exit 1
+        fi
+        CONFLICT=$(echo "$WORKTREES" \
+          | awk -v cur="refs/heads/$CURRENT" -v top="$TOPLEVEL" \
+              '/^worktree/{wt=$2} /^branch/{if ($2==cur && wt!=top) print wt}')
+        if [ -n "$CONFLICT" ]; then
+          echo "ERROR: Branch '$CURRENT' belongs to worktree $CONFLICT, not $TOPLEVEL"
+          echo "Run your commit from: $CONFLICT"
+          exit 1
+        fi
+    biome-format:
+      # Pinned to the version in biome.json's $schema (2.3.15): an unpinned `npx` fetches
+      # latest, which rejects this config's schema. The linter is off until
+      # scripts/lib/impact-score.ts is fixed (see header). 14 files are unformatted on main,
+      # so this auto-fixes and re-stages a staged file, it never fails on legacy formatting.
+      glob: "*.{ts,tsx,js,jsx,json}"
+      run: 'if command -v npx >/dev/null; then npx --yes @biomejs/biome@2.3.15 check --write --linter-enabled=false --no-errors-on-unmatched --files-ignore-unknown=true {staged_files}; else echo "npx not available, skipping biome"; fi'
+      stage_fixed: true
+    actionlint:
+      glob: ".github/workflows/*.{yml,yaml}"
+      run: 'if command -v actionlint >/dev/null; then actionlint {staged_files}; else echo "actionlint not installed, skipping"; fi'
+    shellcheck:
+      glob: "*.sh"
+      run: 'if command -v shellcheck >/dev/null; then shellcheck --severity=warning {staged_files}; else echo "shellcheck not installed, skipping"; fi'
+
+prepare-commit-msg:
+  commands:
+    # Stamps a git-parseable `SESSION: <id>` trailer on commits made from a companion session
+    # (wilco scripts/session-trailer.sh). Skipped silently where wilco is not installed.
+    session-trailer:
+      # Guard on install, not on exit status: a helper failure is logged (never fails the commit).
+      run: |
+        if command -v wilco-session-trailer >/dev/null 2>&1; then
+          wilco-session-trailer {1} {2} {3} || echo "session-trailer: wilco-session-trailer exited $? (commit continues)" >&2
+        fi
+
+pre-push:
+  parallel: true
+  commands:
+    divergence-guard:
+      run: |
+        BRANCH=$(git branch --show-current)
+        if [ "$BRANCH" = "main" ] || [ "$BRANCH" = "master" ]; then
+          # Fail closed, same as rebase-freshness-guard below: an unchecked
+          # fetch leaves origin/$BRANCH stale, the divergence condition
+          # clears, and the guard passes without having verified anything.
+          # Fetch into a PRIVATE ref rather than relying on FETCH_HEAD.
+          # This hook runs `parallel: true`, so this guard and
+          # rebase-freshness-guard fetch concurrently into the same
+          # .git/FETCH_HEAD and then both read it — whichever finishes second
+          # wins, and the loser compares against the other's branch. An
+          # explicit refspec writes a ref only this guard reads, which also
+          # removes the dependence on the remote's configured refspec that
+          # made FETCH_HEAD necessary in the first place.
+          if ! git fetch origin "+$BRANCH:refs/lefthook/divergence-base" --quiet; then
+            echo "ERROR: cannot fetch origin/$BRANCH — divergence is unverifiable." >&2
+            # The escape hatch belongs where the failure is hit, not only in
+            # the file header: offline and VPN-less pushes land here, and a
+            # bare "unverifiable" leaves the reader with no sanctioned move.
+            echo "  Offline? LEFTHOOK=0 git push  (skips the hook chain)" >&2
+            exit 1
+          fi
+          LOCAL=$(git rev-parse "$BRANCH")
+          # Fail closed if the ref will not resolve. Swallowing this lookup
+          # with 2>/dev/null made a missing ref read as "no divergence":
+          # REMOTE came back empty, the `-n` test short-circuited, and the
+          # guard passed without comparing anything.
+          if ! REMOTE=$(git rev-parse --verify refs/lefthook/divergence-base); then
+            echo "ERROR: fetched origin/$BRANCH but its ref will not resolve." >&2
+            echo "  Offline? LEFTHOOK=0 git push  (skips the hook chain)" >&2
+            exit 1
+          fi
+          if ! BASE=$(git merge-base "$BRANCH" "$REMOTE"); then
+            echo "ERROR: no merge base between $BRANCH and origin/$BRANCH." >&2
+            echo "  Offline? LEFTHOOK=0 git push  (skips the hook chain)" >&2
+            exit 1
+          fi
+          if [ "$LOCAL" != "$REMOTE" ] && [ "$BASE" != "$REMOTE" ]; then
+            BEHIND=$(git rev-list --count "$BRANCH..$REMOTE")
+            AHEAD=$(git rev-list --count "$REMOTE..$BRANCH")
+            echo "ERROR: Local $BRANCH has diverged from origin/$BRANCH"
+            echo "  Local is $AHEAD ahead, $BEHIND behind"
+            echo ""
+            echo "Fix: git pull --rebase origin $BRANCH"
+            exit 1
+          fi
+        fi
+    rebase-freshness-guard:
+      run: |
+        BRANCH=$(git branch --show-current)
+        # Only check feature branches, not main
+        if [ "$BRANCH" = "main" ] || [ "$BRANCH" = "master" ]; then exit 0; fi
+
+        # Fail closed. `|| exit 0` here let a DNS/auth/offline failure pass the
+        # guard against a stale `origin/main` and report BEHIND=0 — "cannot
+        # verify" silently became "verified fresh". A push needs the network
+        # anyway, so a fetch that cannot reach origin is a real problem.
+        # Private ref, not FETCH_HEAD: see divergence-guard above. This hook
+        # is `parallel: true` and that guard fetches a different branch into
+        # the same .git/FETCH_HEAD, so reading it here can compare this
+        # branch against its OWN remote tip instead of main — BEHIND=0, and
+        # the fail-open returns through a different door.
+        if ! git fetch origin "+main:refs/lefthook/freshness-base" --quiet; then
+          echo "ERROR: cannot fetch origin/main — freshness is unverifiable." >&2
+          echo "  Fix the network/auth problem, or rebase manually and retry." >&2
+          echo "  Offline? LEFTHOOK=0 git push  (skips the hook chain)" >&2
+          exit 1
+        fi
+
+        # Block if branch is behind main — force rebase before push.
+        #
+        # Read the fetched ref, not refs/remotes/origin/main. Git only
+        # opportunistically updates the remote-tracking ref when the remote's
+        # configured refspec covers the branch, so after `clone
+        # --single-branch` origin/main stays pinned and BEHIND computes to 0
+        # against a stale commit — the exact fail-open the fetch check above
+        # was added to close, one line further down. Fixing it in
+        # divergence-guard and not here left the hole open in the guard that
+        # covers every feature branch, which is the wider of the two.
+        if ! UPSTREAM=$(git rev-parse --verify refs/lefthook/freshness-base); then
+          echo "ERROR: fetched origin/main but its ref will not resolve." >&2
+          echo "  Offline? LEFTHOOK=0 git push  (skips the hook chain)" >&2
+          exit 1
+        fi
+        # Guard the count too: `[ "$BEHIND" -gt 0 ]` on empty output aborts with
+        # "integer expression expected", which is a crash, not a verdict.
+        if ! BEHIND=$(git rev-list --count "HEAD..$UPSTREAM"); then
+          echo "ERROR: cannot count commits behind origin/main." >&2
+          echo "  Offline? LEFTHOOK=0 git push  (skips the hook chain)" >&2
+          exit 1
+        fi
+        if [ "$BEHIND" -gt 0 ]; then
+          echo "ERROR: Branch '$BRANCH' is $BEHIND commit(s) behind origin/main"
+          echo "  This PR would silently revert changes merged to main after this branch was created."
+          echo ""
+          echo "  Fix: git fetch origin main && git rebase origin/main"
+          exit 1
+        fi
+    tests:
+      # CI has no test job for this repo, so this is the only runner. Explicit paths: a bare
+      # `bun test` also picks up scripts/ci-review.test.ts, which cannot load (see header).
+      run: |
+        if ! command -v bun >/dev/null; then
+          echo "ERROR: bun is required to run the tests (eval/, .github/scripts/)." >&2
+          exit 1
+        fi
+        bun test eval .github/scripts || exit 1
+    session-review:
+      # Deterministic finding-based review gate (wilco scripts/pre-push-session-review.ts;
+      # see review-gate-fix-or-ack). Runs concurrently with the other pre-push commands.
+      # Overridable: the default is one developer's checkout layout, and a contributor
+      # whose wilco lives elsewhere should move the path, not lose the gate.
+      run: |
+        REVIEW_SCRIPT="${WILCO_REVIEW_SCRIPT:-$HOME/wilco/scripts/pre-push-session-review.ts}"
+        if [ ! -f "$REVIEW_SCRIPT" ]; then
+          # Deliberately NOT exit 1: wilco is a personal toolchain, not a dependency of
+          # this repo, so a teammate without it must still be able to push. Say loudly
+          # which gate did not run: a missing review gate must not read like a pass.
+          echo "WARNING: session review DID NOT RUN - no script at $REVIEW_SCRIPT." >&2
+          echo "  This push was NOT reviewed. Set WILCO_REVIEW_SCRIPT to your" >&2
+          echo "  checkout's scripts/pre-push-session-review.ts to enable it." >&2
+        elif command -v bun >/dev/null; then
+          bun run "$REVIEW_SCRIPT" 2>&1 || exit 1
+        else
+          echo "ERROR: session review script present but no bun to run it." >&2
+          exit 1
+        fi
