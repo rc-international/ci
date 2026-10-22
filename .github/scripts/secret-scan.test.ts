@@ -97,6 +97,7 @@ async function scan(env: Record<string, string>, script = scanScript()) {
 
 const pr = (head: string) => ({ EVENT_NAME: 'pull_request', PR_BASE_SHA: sha.base, PR_HEAD_SHA: head })
 const push = (before: string, after: string) => ({ EVENT_NAME: 'push', PUSH_BEFORE: before, PUSH_AFTER: after })
+const mq = (base: string, head: string) => ({ EVENT_NAME: 'merge_group', MQ_BASE_SHA: base, MQ_HEAD_SHA: head })
 
 describe('secret-scan range selection', () => {
   // Mutation: scan `--all` instead of base..head -> the OLD leak fails the clean PR.
@@ -104,7 +105,7 @@ describe('secret-scan range selection', () => {
     const r = await scan(pr(sha.leak))
     expect(r.code).toBe(1)
     expect(r.out).toContain('leaks found: 1')
-    const report = readFileSync(join(runnerTemp, 'gitleaks.sarif'), 'utf8')
+    const report = readFileSync(join(runnerTemp, 'gitleaks.json'), 'utf8')
     expect(report).not.toContain(NEW_KEY)
   })
 
@@ -143,14 +144,71 @@ describe('secret-scan range selection', () => {
     expect((await scan(push(sha.leak, ZERO))).code).toBe(0)
   })
 
+  // WHY: darena uses a merge queue. A required check that exits 1 on merge_group
+  // stalls the queue. The queue range is base_sha..head_sha, so it is scanned.
+  // Mutation: delete the merge_group case -> falls to the unsupported-event branch.
+  test('merge_group: a planted key in the queue range fails', async () => {
+    const r = await scan(mq(sha.base, sha.leak))
+    expect(r.code).toBe(1)
+    expect(r.out).toContain('Scanning git range')
+    expect(r.out).toContain('leaks found: 1')
+  })
+
+  test('merge_group: a clean range passes; older history is not rescanned', async () => {
+    const r = await scan(mq(sha.base, sha.clean))
+    expect(r.code).toBe(0)
+    expect(r.out).toContain('no leaks found')
+  })
+
+  // WHY: no range means no scan. The old code failed these; a silent pass would
+  // be worse, so a missing or unresolvable sha must still fail.
+  test('merge_group: missing or unresolvable shas fail closed', async () => {
+    expect((await scan(mq('', sha.leak))).code).toBe(1)
+    const r = await scan(mq('1'.repeat(40), sha.leak))
+    expect(r.code).not.toBe(0)
+  })
+
   test('an unsupported event fails closed', async () => {
     const r = await scan({ EVENT_NAME: 'schedule' })
     expect(r.code).toBe(1)
-    expect(r.out).toContain('supports pull_request and push only')
+    expect(r.out).toContain('supports pull_request, push and merge_group only')
   })
 
   test('a malformed range fails closed', async () => {
     expect((await scan(pr(`${sha.leak} --bogus-flag`))).code).not.toBe(0)
+  })
+})
+
+describe('secret-scan findings in the job log', () => {
+  // WHY: a log of only "leaks found: N" forces a re-run locally to learn what
+  // leaked. The log must name the finding but never carry the secret.
+  // Mutation (secret absent): add --no-redact to gitleaks args and print .Secret
+  // in the jq filter -> the NEW_KEY assertion fails.
+  test('lists RuleID, File, StartLine, Commit and Fingerprint; never the secret', async () => {
+    const r = await scan(pr(sha.leak))
+    expect(r.code).toBe(1)
+    expect(r.out).toContain('aws-access-token')
+    expect(r.out).toContain('cfg.env')
+    expect(r.out).toMatch(/line[ =]1\b/)
+    expect(r.out).toContain(git(['rev-parse', `${sha.leak}~1`]))
+    expect(r.out).toContain(`${git(['rev-parse', `${sha.leak}~1`])}:cfg.env:aws-access-token:1`)
+    expect(r.out).not.toContain(NEW_KEY)
+    expect(r.out).not.toContain(NEW_KEY.slice(4))
+  })
+
+  test('emits one ::error file=,line= annotation per finding', async () => {
+    const r = await scan(push(ZERO, sha.leak))
+    const ann = r.out.split('\n').filter((l) => l.startsWith('::error file='))
+    expect(ann.length).toBe(2)
+    expect(ann.some((l) => l.includes('file=cfg.env,line=1'))).toBe(true)
+    expect(ann.some((l) => l.includes('file=old.env,line=1'))).toBe(true)
+    for (const l of ann) expect(l).not.toContain(OLD_KEY)
+    expect(r.out).not.toContain(OLD_KEY)
+  })
+
+  test('a clean scan prints no finding annotations', async () => {
+    const r = await scan(pr(sha.clean))
+    expect(r.out).not.toContain('::error file=')
   })
 })
 
