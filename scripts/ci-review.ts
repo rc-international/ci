@@ -42,6 +42,17 @@ import {
 import { type CommitAuthor, checkCommitAuthors } from './lib/commit-author-guard.js'
 import { computeImpactScore, formatImpactScore, type ImpactScore } from './lib/impact-score.js'
 import {
+  BUSINESS_OUTCOMES_SECTION,
+  checkBusinessOutcomes,
+  checkRegistryChanges,
+  diffChangedPaths,
+  loadOutcomeRegistry,
+  OUTCOME_ADVISORY_UNTIL,
+  OUTCOME_FINDINGS_SEVERITY,
+  type OutcomeSeverity,
+  scanOwnerProvenance,
+} from './lib/outcome-lines.js'
+import {
   buildReviewPrompt,
   PR_BODY_REQUIRED_SECTIONS,
   type ReviewFinding,
@@ -495,7 +506,63 @@ function reviewEvent(findings: ReviewFinding[]): 'REQUEST_CHANGES' | 'COMMENT' |
 function reviewOutcomeWithoutModel(
   deterministicFindings: ReviewFinding[]
 ): 'REQUEST_CHANGES' | 'COMMENT' {
-  return deterministicFindings.length > 0 ? 'REQUEST_CHANGES' : 'COMMENT'
+  return deterministicEvent(deterministicFindings, 'COMMENT')
+}
+
+/**
+ * Event for deterministic findings alone: REQUEST_CHANGES only when one is
+ * blocking-grade (critical/high), otherwise `clean`. Advisory (medium/low)
+ * findings, such as the first-week `## Business Outcomes` ones, are posted in the
+ * body but must not block, on any code path.
+ */
+function deterministicEvent<T extends 'APPROVE' | 'COMMENT'>(
+  deterministicFindings: ReviewFinding[],
+  clean: T
+): 'REQUEST_CHANGES' | T {
+  return reviewEvent(deterministicFindings) === 'REQUEST_CHANGES' ? 'REQUEST_CHANGES' : clean
+}
+
+/**
+ * Event + body for a completed model review. A review served by the FALLBACK model
+ * is advisory: its model findings are listed but cannot REQUEST_CHANGES (COMMENT
+ * instead), and it carries no cache marker so the next run asks the primary model
+ * again rather than reusing weaker findings as a primary verdict. Deterministic
+ * findings (commit author, PR body) do not depend on the model and keep their
+ * verdict either way. A prior primary APPROVE / CHANGES_REQUESTED is never touched:
+ * a COMMENT review does not replace either on GitHub, and this script dismisses
+ * nothing. `servedModel` undefined (verdict reused from a prior primary review) is
+ * treated as primary.
+ */
+function composeReview(input: {
+  deterministic: ReviewFinding[]
+  model: ReviewFinding[]
+  servedModel?: string
+  cacheMarker: string | null
+  wasTruncated: boolean
+  fileCount: number
+  impactScore?: ImpactScore
+}): { event: 'REQUEST_CHANGES' | 'COMMENT' | 'APPROVE'; body: string; failCheck: boolean } {
+  const fallbackModel =
+    input.servedModel && input.servedModel !== REVIEW_MODEL ? input.servedModel : undefined
+  const findings = [...input.deterministic, ...input.model]
+  let event = reviewEvent(findings)
+  // A fallback review never APPROVEs either: a weaker model's clean pass must not
+  // replace a prior primary CHANGES_REQUESTED on GitHub.
+  if (fallbackModel && reviewEvent(input.deterministic) !== 'REQUEST_CHANGES') {
+    event = 'COMMENT'
+  }
+  const body = formatReviewBody(findings, {
+    wasTruncated: input.wasTruncated,
+    fileCount: input.fileCount,
+    impactScore: input.impactScore,
+    fallbackModel,
+    cacheMarker: fallbackModel ? null : input.cacheMarker,
+  })
+  // Branch protection needs an approving review; a fallback COMMENT cannot supply
+  // one, so with blocking-grade LLM findings the PR would stall silently. Turn the
+  // code-review check red so the author sees it (zero findings stays green).
+  const failCheck = Boolean(fallbackModel) && reviewEvent(input.model) === 'REQUEST_CHANGES'
+  return { event, body, failCheck }
 }
 
 interface FormatOptions {
@@ -536,6 +603,9 @@ function formatReviewBody(rawFindings: ReviewFinding[], opts: FormatOptions): st
   if (opts.fallbackModel) {
     lines.push(
       `> **Note:** Primary model ${REVIEW_MODEL} was unavailable; reviewed by fallback ${opts.fallbackModel}.`
+    )
+    lines.push(
+      `> The fallback review is advisory: it posts a COMMENT and cannot approve, so it does not satisfy the required approving review. To get a primary-model re-review, push a new commit or close and reopen the PR (an issue comment does not re-run the review). An ${[...TRUSTED_APPROVAL_ASSOCIATIONS].join('/').toLowerCase()} of the org can instead approve manually by commenting \`${APPROVAL_COMMENT}\`.`
     )
     lines.push('')
   }
@@ -622,6 +692,32 @@ function getPrCommitMessages(prNumber: string): string[] {
     return json.trim().split('\n').filter(Boolean)
   } catch (err) {
     console.debug(`[ci-review] PR commit messages fetch failed for #${prNumber}:`, err)
+    return []
+  }
+}
+
+/** Full commit messages (headline + body) for the F19 owner-attribution scan. */
+function getPrCommitFullMessages(prNumber: string): string[] {
+  try {
+    const raw = execFileSync(
+      'gh',
+      [
+        'pr',
+        'view',
+        String(prNumber),
+        '--json',
+        'commits',
+        '--jq',
+        '.commits[] | (.messageHeadline + "\\n" + .messageBody) | tojson',
+      ],
+      { encoding: 'utf-8', timeout: 10_000 }
+    )
+    return raw
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as string)
+  } catch (err) {
+    console.warn(`[ci-review] PR full commit messages fetch failed for #${prNumber}:`, err)
     return []
   }
 }
@@ -809,8 +905,12 @@ function collectDepth2Headings(tree: Root): Set<string> {
   return headings
 }
 
-function checkPrBodySections(prBody: string | undefined | null): ReviewFinding[] {
+function checkPrBodySections(
+  prBody: string | undefined | null,
+  opts: { outcomeSeverity?: OutcomeSeverity } = {}
+): ReviewFinding[] {
   const body = prBody ?? ''
+  const outcomeSeverity = opts.outcomeSeverity ?? OUTCOME_FINDINGS_SEVERITY
   const findings: ReviewFinding[] = []
 
   // Parse once. A parse failure on pathological input must FAIL CLOSED — the
@@ -834,17 +934,89 @@ function checkPrBodySections(prBody: string | undefined | null): ReviewFinding[]
     // decorated or longer heading does not satisfy — see the doc comment above.
     if (present.has(sectionName(section))) continue
 
+    // `## Business Outcomes` is advisory (MEDIUM) until OUTCOME_FINDINGS_SEVERITY is flipped.
+    const advisory = section === BUSINESS_OUTCOMES_SECTION && outcomeSeverity === 'medium'
     findings.push({
       file: 'PR_BODY',
-      severity: 'high',
+      severity: section === BUSINESS_OUTCOMES_SECTION ? outcomeSeverity : 'high',
       category: 'pr-structure',
-      description: `The PR body is missing the required \`${section}\` section. It needs a top-level level-2 Markdown heading whose text is EXACTLY \`${sectionName(section)}\` — the simplest way is a line containing only \`${section}\`. A decorated heading such as \`${section} (details)\` or \`${section} — notes\` does NOT count (move the extra text to the line below), and a heading nested inside a blockquote or list item (e.g. \`> ${section}\`) does NOT count — the heading must be a top-level section, not quoted or embedded content. Per docs/glossary.md "PR" recipe step 10, every PR body must contain ${PR_BODY_REQUIRED_SECTIONS.map((s) => `\`${s}\``).join(', ')}.`,
+      description: `${advisory ? `(advisory until ${OUTCOME_ADVISORY_UNTIL}) ` : ''}The PR body is missing the required \`${section}\` section. It needs a top-level level-2 Markdown heading whose text is EXACTLY \`${sectionName(section)}\` — the simplest way is a line containing only \`${section}\`. A decorated heading such as \`${section} (details)\` or \`${section} — notes\` does NOT count (move the extra text to the line below), and a heading nested inside a blockquote or list item (e.g. \`> ${section}\`) does NOT count — the heading must be a top-level section, not quoted or embedded content. Per docs/glossary.md "PR" recipe step 10, every PR body must contain ${PR_BODY_REQUIRED_SECTIONS.map((s) => `\`${s}\``).join(', ')}.`,
       suggested_fix: `Add a top-level level-2 heading reading exactly \`${sectionName(section)}\` (the plain form \`${section}\` on its own line), not nested inside a blockquote or list, and put any qualifier on the following line.`,
       line_range: section,
     })
   }
 
   return findings
+}
+
+/**
+ * Business-outcome findings (docs/design/business-outcome-linkage.md 4.2, 4.7):
+ * the `## Business Outcomes` section grammar, registry id checks (only when the
+ * checked-out PR head carries a registry), the decision-paths rule, and the F19
+ * owner-attribution scan of added lines and commit messages. Pure given its
+ * inputs; main() supplies the registry root, PR body, diff and commit messages.
+ */
+async function resolveOutcomeFindings(input: {
+  prBody: string | undefined | null
+  rawDiff: string
+  commitMessages: string[]
+  root: string
+}): Promise<ReviewFinding[]> {
+  const { registry, error } = await loadOutcomeRegistry(input.root)
+  const findings: ReviewFinding[] = []
+  if (error) {
+    console.warn(`[ci-review] Outcome registry unusable; id checks skipped: ${error}`)
+    findings.push({
+      file: 'PR_BODY',
+      severity: OUTCOME_FINDINGS_SEVERITY,
+      category: 'pr-structure',
+      description: `The outcome registry could not be used, so kpi/gate/decision ids were not checked: ${error.slice(0, 200)}`,
+      suggested_fix:
+        'Fix config/business_outcomes.yaml or config/outcomes/ (valid YAML, exactly one layout).',
+      line_range: BUSINESS_OUTCOMES_SECTION,
+    })
+  }
+  findings.push(
+    ...checkBusinessOutcomes(input.prBody, {
+      registry,
+      changedFiles: diffChangedPaths(input.rawDiff),
+    }),
+    ...checkRegistryChanges(input.rawDiff, { registry }),
+    ...scanOwnerProvenance(input.rawDiff, input.commitMessages, {
+      decisionIds: registry ? new Set(registry.decisions.keys()) : undefined,
+    })
+  )
+  return findings
+}
+
+/**
+ * The org-wide entry point: runs resolveOutcomeFindings but can never throw.
+ * Outcome checks are advisory-first and run in every repo's required check; a
+ * bug or a missing dependency here must not turn into a red CI run (or a
+ * skipped review) everywhere. A crash becomes ONE finding at the rollout severity.
+ * `input` is a thunk so a throwing input (e.g. `gh` failing on commit messages)
+ * is caught too.
+ */
+async function resolveOutcomeFindingsSafely(
+  input: () => Parameters<typeof resolveOutcomeFindings>[0]
+): Promise<ReviewFinding[]> {
+  try {
+    return await resolveOutcomeFindings(input())
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error(`[ci-review] Business-outcome checks could not run: ${msg}`)
+    return [
+      {
+        file: 'PR_BODY',
+        severity: OUTCOME_FINDINGS_SEVERITY,
+        category: 'pr-structure',
+        description: `outcome checks could not run: ${msg.slice(0, 200)}`,
+        suggested_fix:
+          'This is a tooling failure, not a problem with the PR. Report it to the ci repo owners.',
+        line_range: BUSINESS_OUTCOMES_SECTION,
+      },
+    ]
+  }
 }
 
 // ── Prior PR reviews + comments (verdict cache, rebuttal memory) ─────────────
@@ -1064,11 +1236,22 @@ async function main(): Promise<void> {
   // All findings that do not depend on the LLM. If any exist, the review must
   // REQUEST_CHANGES no matter which downstream path (empty/docs/no-key/api-error)
   // is taken.
-  const deterministicFindings = [...authorFindings, ...prBodyFindings]
+  const outcomeFindings = await resolveOutcomeFindingsSafely(() => ({
+    prBody,
+    rawDiff,
+    commitMessages: getPrCommitFullMessages(prNumber),
+    root: process.cwd(),
+  }))
+  if (outcomeFindings.length > 0) {
+    console.warn(
+      `[ci-review] Business-outcome checks raised ${outcomeFindings.length} finding(s) (${outcomeFindings.map((f) => f.severity).join(',')}).`
+    )
+  }
+  const deterministicFindings = [...authorFindings, ...prBodyFindings, ...outcomeFindings]
 
   if (diffInfo.isEmpty) {
     console.log('[ci-review] Empty diff, skipping code review.')
-    const event = deterministicFindings.length > 0 ? 'REQUEST_CHANGES' : 'APPROVE'
+    const event = deterministicEvent(deterministicFindings, 'APPROVE')
     const body =
       deterministicFindings.length > 0
         ? formatReviewBody(deterministicFindings, { wasTruncated: false, fileCount: 0 })
@@ -1079,7 +1262,7 @@ async function main(): Promise<void> {
 
   if (diffInfo.isDocsOnly) {
     console.log('[ci-review] Docs-only changes, skipping code review.')
-    const event = deterministicFindings.length > 0 ? 'REQUEST_CHANGES' : 'APPROVE'
+    const event = deterministicEvent(deterministicFindings, 'APPROVE')
     const body =
       deterministicFindings.length > 0
         ? formatReviewBody(deterministicFindings, {
@@ -1215,16 +1398,22 @@ async function main(): Promise<void> {
     console.warn(`[ci-review] Impact score computation failed: ${(err as Error)?.message || err}`)
   }
 
-  const event = reviewEvent(findings)
-  const body = formatReviewBody(findings, {
+  const { event, body, failCheck } = composeReview({
+    deterministic: deterministicFindings,
+    model: result.findings,
+    servedModel: result.model,
+    cacheMarker,
     wasTruncated: diffInfo.wasTruncated,
     fileCount: diffInfo.fileCount,
     impactScore,
-    fallbackModel: result.model && result.model !== REVIEW_MODEL ? result.model : undefined,
-    cacheMarker,
   })
 
   await postPrReview(prNumber, repo, event, body)
+  if (failCheck) {
+    console.error(
+      '[ci-review] Fallback model served this review with high/critical findings: posted COMMENT (cannot approve); failing the check so the author sees it.'
+    )
+  }
 
   // Log summary
   const logCounts: Record<string, number> = {
@@ -1241,13 +1430,15 @@ async function main(): Promise<void> {
     `[ci-review] Review complete: ${findings.length} findings (critical=${logCounts.critical}, high=${logCounts.high}, medium=${logCounts.medium}, low=${logCounts.low}, needs-verification=${logCounts['needs-verification']})`
   )
 
-  // Don't fail the workflow — the PR review itself communicates the findings
-  process.exit(0)
+  // The PR review itself communicates the findings; only a fallback-served review
+  // with blocking-grade findings fails the check (see composeReview).
+  process.exit(failCheck ? 1 : 0)
 }
 
 // ── Exports for testing ─────────────────────────────────────────────────────
 
 export {
+  composeReview,
   buildReviewPrompt,
   buildUserMessage,
   callReviewModel,
@@ -1273,6 +1464,10 @@ export {
   resolveCommitAuthorFindings,
   getPrBody,
   checkPrBodySections,
+  resolveOutcomeFindings,
+  resolveOutcomeFindingsSafely,
+  getPrCommitFullMessages,
+  deterministicEvent,
   CI_TIMEOUT_MS,
   type ReviewResult,
   type DiffInfo,
