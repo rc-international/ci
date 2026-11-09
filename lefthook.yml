@@ -101,7 +101,12 @@ prepare-commit-msg:
       # Guard on install, not on exit status: a helper failure is logged (never fails the commit).
       run: |
         if command -v wilco-session-trailer >/dev/null 2>&1; then
-          wilco-session-trailer {1} {2} {3} || echo "session-trailer: wilco-session-trailer exited $? (commit continues)" >&2
+          # Installed but failing = fail closed: a commit must not land silently without its SESSION trailer.
+          # (Not installed = skipped above; wilco is a personal toolchain, not a dependency of this repo.)
+          if ! wilco-session-trailer {1} {2} {3}; then
+            echo "session-trailer: wilco-session-trailer failed; commit blocked (fix it, or LEFTHOOK=0 to bypass)" >&2
+            exit 1
+          fi
         fi
 
 pre-push:
@@ -130,7 +135,10 @@ pre-push:
             echo "  Offline? LEFTHOOK=0 git push  (skips the hook chain)" >&2
             exit 1
           fi
-          LOCAL=$(git rev-parse "$BRANCH")
+          if ! LOCAL=$(git rev-parse --verify "$BRANCH"); then
+            echo "ERROR: local $BRANCH will not resolve; divergence is unverifiable." >&2
+            exit 1
+          fi
           # Fail closed if the ref will not resolve. Swallowing this lookup
           # with 2>/dev/null made a missing ref read as "no divergence":
           # REMOTE came back empty, the `-n` test short-circuited, and the
@@ -146,8 +154,9 @@ pre-push:
             exit 1
           fi
           if [ "$LOCAL" != "$REMOTE" ] && [ "$BASE" != "$REMOTE" ]; then
-            BEHIND=$(git rev-list --count "$BRANCH..$REMOTE")
-            AHEAD=$(git rev-list --count "$REMOTE..$BRANCH")
+            # Counts are for the message only; this block exits 1 whatever they read.
+            BEHIND=$(git rev-list --count "$BRANCH..$REMOTE") || BEHIND="?"
+            AHEAD=$(git rev-list --count "$REMOTE..$BRANCH") || AHEAD="?"
             echo "ERROR: Local $BRANCH has diverged from origin/$BRANCH"
             echo "  Local is $AHEAD ahead, $BEHIND behind"
             echo ""
