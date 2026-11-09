@@ -65,7 +65,12 @@ const CATEGORY_TITLES: Record<string, string> = {
  * Required sections in a PR body, per docs/glossary.md "PR" recipe step 10.
  * Used by the PR-structure check to flag missing or vague sections.
  */
-export const PR_BODY_REQUIRED_SECTIONS = ['## Summary', '## Changes', '## Test Plan'] as const
+export const PR_BODY_REQUIRED_SECTIONS = [
+  '## Summary',
+  '## Changes',
+  '## Test Plan',
+  '## Business Outcomes', // advisory (MEDIUM) until promoted: see scripts/lib/outcome-lines.ts
+] as const
 
 export const PR_BODY_CONDITIONAL_SECTIONS = [
   '## Operator Deploy Steps', // required if PR touches production
@@ -76,7 +81,7 @@ export const PR_BODY_CONDITIONAL_SECTIONS = [
  * Reusable PR-structure rule, injected into both buildReviewPrompt() and FALLBACK_PROMPT
  * so the prompt content is identical regardless of YAML availability.
  *
- * NOTE: the ALWAYS-required sections (## Summary, ## Changes, ## Test Plan) are
+ * NOTE: the ALWAYS-required sections (## Summary, ## Changes, ## Test Plan, ## Business Outcomes) are
  * checked DETERMINISTICALLY in code (see checkPrBodySections in ci-review.ts) —
  * "does the body contain this heading" is not a judgement call. Asking the model
  * to also judge it produced a false CHANGES_REQUESTED on darena #589 (it claimed
@@ -86,7 +91,7 @@ export const PR_BODY_CONDITIONAL_SECTIONS = [
  * (→ Expected Outcomes), and whether present sections are vague/unverifiable.
  */
 export const PR_STRUCTURE_RULE = `### PR structure
-When the user message contains a \`## PR Body\` block, evaluate the PR body against the structure required by \`docs/glossary.md\` "PR" recipe step 10. The presence of the always-required sections (\`## Summary\`, \`## Changes\`, \`## Test Plan\`) is verified deterministically in code — do NOT emit a finding about those sections being missing. Judge only the CONDITIONAL sections and the quality of sections that are present:
+When the user message contains a \`## PR Body\` block, evaluate the PR body against the structure required by \`docs/glossary.md\` "PR" recipe step 10. The presence of the always-required sections (\`## Summary\`, \`## Changes\`, \`## Test Plan\`, \`## Business Outcomes\`) is verified deterministically in code, as are the grammar, the ids and the \`Business outcome:\` line inside \`## Business Outcomes\` — do NOT emit a finding about any of those being missing or malformed. Judge only the CONDITIONAL sections and the quality of sections that are present:
 - \`## Operator Deploy Steps\` — required if the diff touches production code (fleet scripts, services, scheduled jobs, infra, schemas, CI workflows). Flag HIGH if it is required by the diff but missing.
 - \`## Expected Outcomes\` — required on non-trivial PRs (anything bigger than a typo). Flag HIGH if it is required but missing.
 
@@ -95,23 +100,20 @@ Also flag as HIGH severity:
 - \`## Expected Outcomes\` items without verifiable acceptance criteria (e.g. "verify it works", "should be fine", no \`- [ ]\` checklist)
 - \`## Test Plan\` post-merge items (\`- [ ]\`) that are not runnable commands
 
+Flag as MEDIUM severity only (never HIGH, and never about presence):
+- \`## Business Outcomes\` lines whose claim does not plausibly follow from the diff (e.g. the KPI, gate or direction has no visible connection to the changed code, or \`Business outcome: none — <reason>\` on a PR that visibly changes product behaviour). Whether the section or the \`Business outcome:\` line EXISTS is not your call.
+
 The finding's \`file\` field for these checks is the literal string \`PR_BODY\` (not a source file path), and \`line_range\` is the section name (e.g. "## Operator Deploy Steps").`
 
 /**
  * Mandatory engineering rules, injected alongside PR_STRUCTURE_RULE into both
  * buildReviewPrompt() and FALLBACK_PROMPT. Encodes the team's most frequently
- * repeated review-finding categories. Severity follows the impact rubric
- * (review-gate-v2 P1b): a rule's "HIGH when" is its usual impact, not a floor,
- * because labelling every violation HIGH made 82% of findings blocking.
+ * repeated review-finding categories so violations surface as HIGH severity
+ * (which triggers REQUEST_CHANGES and blocks merge).
  */
-export const ENGINEERING_RULES = `### Engineering rules (mandatory — severity by impact)
+export const ENGINEERING_RULES = `### Engineering rules (mandatory — flag violations as HIGH)
 
-Evaluate the diff against the rules below. For ANY real violation visible in the diff, emit a finding citing the exact file and line. Set its severity by IMPACT, not by the rule's label:
-- critical: data loss, a security breach, or an outage of a shared service.
-- high: wrong behaviour on a path that a real input or state reaches. State that input or state in "failure_scenario".
-- medium: a latent defect — it needs an unusual state, or no reachable caller in the diff.
-- low: hygiene — style, naming, documentation.
-A rule's "HIGH when" names its usual impact. Downgrade when your failure_scenario is not reachable. Do not downgrade a security, data-loss, or silent-error-handling (rule 2) finding. A high or critical finding triggers REQUEST_CHANGES and blocks the merge until fixed, so it needs a concrete, reachable failure_scenario. These encode the team's most frequently-repeated review findings. IMPORTANT: only flag what the changed lines actually show; do not invent violations or flag a rule that does not apply to this diff.
+Evaluate the diff against the rules below. For ANY real violation visible in the diff, emit a finding with severity "high" (or "critical" for an issue that can take down a shared service or cause data loss) citing the exact file and line — a HIGH finding triggers REQUEST_CHANGES and blocks the merge until fixed. These encode the team's most frequently-repeated review findings. IMPORTANT: only flag what the changed lines actually show; do not invent violations or flag a rule that does not apply to this diff.
 
 1. Unverified assumptions. HIGH when: code, comments, log lines, or messages assert a fact or number with no basis (e.g. throughput like "235 records/hour", "this is correct", "the migration is broken") as if verified; or a calculation uses unverified inputs but is stated as a precise result instead of an estimate.
 
@@ -123,7 +125,7 @@ A rule's "HIGH when" names its usual impact. Downgrade when your failure_scenari
 
 5. Security. HIGH when: TLS/host verification is disabled (\`NODE_TLS_REJECT_UNAUTHORIZED = '0'\`, \`verify=False\`, \`StrictHostKeyChecking=accept-new\`); SQL is built by string concatenation / f-string instead of a parameterized query; a new HTTP route/handler has no auth check; or credentials are read from an insecure location.
 
-6. Missing tests. HIGH when: a new script, module, or worker — or substantial new logic with a reachable failure path — is added with no test of its behaviour in the same diff. Prefer an end-to-end test that runs the real entry point (script, CLI, hook, endpoint) over per-function unit tests: MEDIUM when the only new tests are unit tests of internals and the behaviour itself is never exercised.
+6. Missing tests. HIGH when: a new script, module, or worker — or substantial new logic — is added with no corresponding test file or test case in the same diff.
 
 7. Production-path changes without a verification story. HIGH when: the diff touches deploy scripts, systemd units, CI workflows, DB schemas/migrations, scheduled jobs, or multi-tenant infra AND the \`## PR Body\` lacks concrete \`## Operator Deploy Steps\` and \`## Expected Outcomes\` containing at least one runnable post-deploy smoke/health command.
 
@@ -167,11 +169,7 @@ A rule's "HIGH when" names its usual impact. Downgrade when your failure_scenari
 
 27. Generated or derived artifact not regenerated after a schema change. HIGH when: the diff edits a source-of-truth schema (\`*.schema.json\`, a Pydantic discriminated union, an OpenAPI/JSON-Schema file) without regenerating the derived types/fixtures/examples in the same diff, or hand-edits a generated file without touching its generator/schema.
 
-28. Uncited capability claim. HIGH when: a comment, docstring, rule/doc file, or PR body asserts that a capability does NOT exist, is unsupported, or is impossible on some path — e.g. "X has no effort concept", "the SDK does not support Y", "this can only be done via Z", "the review clamps the diff at N chars" — without citing what it was checked against (a \`file:line\` in a type definition or implementation, or a doc URL). A NEGATIVE capability claim is the dangerous direction: it reads as a settled design decision rather than an assertion, so reviewers and future authors accept it without re-checking. A wrong one silently deletes a feature, justifies a needless workaround, or ossifies a limitation that no longer exists. Also flag a claim whose only cited source is a follow-up issue, another comment, or a prior PR description rather than the authority itself. Fix: cite the authority inline, or soften the claim to what was actually observed — "we do not currently wire X" instead of "X does not exist".
-
-29. Documentation that explains how, not why. LOW (advisory): flag a comment, docstring, or doc only when a non-obvious decision or constraint has no stated reason, or when it restates what the code plainly does. Do NOT flag missing docstrings.
-
-30. Prose where a diagram belongs. LOW (advisory): a design doc or PR body that describes a flow of 3 or more linked parts (pipeline, state machine, call chain) in prose. Suggest a Mermaid diagram.`
+28. Uncited capability claim. HIGH when: a comment, docstring, rule/doc file, or PR body asserts that a capability does NOT exist, is unsupported, or is impossible on some path — e.g. "X has no effort concept", "the SDK does not support Y", "this can only be done via Z", "the review clamps the diff at N chars" — without citing what it was checked against (a \`file:line\` in a type definition or implementation, or a doc URL). A NEGATIVE capability claim is the dangerous direction: it reads as a settled design decision rather than an assertion, so reviewers and future authors accept it without re-checking. A wrong one silently deletes a feature, justifies a needless workaround, or ossifies a limitation that no longer exists. Also flag a claim whose only cited source is a follow-up issue, another comment, or a prior PR description rather than the authority itself. Fix: cite the authority inline, or soften the claim to what was actually observed — "we do not currently wire X" instead of "X does not exist".`
 
 /**
  * Standardized output schema description for all diff review prompts.
@@ -257,9 +255,9 @@ ${ENGINEERING_RULES}
 
 ${REVIEW_OUTPUT_SCHEMA}
 
-Severity guide (by impact — see the engineering-rules rubric):
-- critical: data loss, security breach (credential exposure, SQL injection, auth bypass), shared-service outage
-- high: wrong behaviour on a reachable path, e.g. empty catch blocks (\`catch {}\`, \`.catch(() => {})\`, \`except: pass\`),
+Severity guide:
+- critical: credential exposure, SQL injection, auth bypass, data loss risk
+- high: empty catch blocks (\`catch {}\`, \`.catch(() => {})\`, \`except: pass\`),
         errors swallowed without any logging at any level, missing input validation
         at system boundaries, no timeouts on network calls, hardcoded secrets/URLs,
         client-trusted auth context, PR body missing a conditionally-required
@@ -270,7 +268,7 @@ Severity guide (by impact — see the engineering-rules rubric):
           missing error context (catch logs without the error object), N+1 query
           patterns. Do NOT down-rank an empty catch to medium just because it is
           "small" — silent error swallowing is always high.
-- low: hygiene — style issues, naming, documentation that lacks a why
+- low: style issues, minor documentation gaps
 - needs-verification: finding looks suspicious but evidence is inconclusive — reviewer should verify
 
 If the code looks clean, return: {"findings": []}
