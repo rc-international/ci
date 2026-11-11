@@ -1,10 +1,15 @@
 # Drift check: the review scripts in this repo must equal rc-international/wilco main.
-# wilco is the source (scripts/sync-ci.sh publishes the copies here). Compares this PR's
-# files with wilco `main` at run time, so a ci PR that carries a gate change is red until the
-# matching wilco PR has merged. Merge the wilco change first.
+# wilco is the source (scripts/sync-ci.sh publishes the copies here). The file list is wilco's own
+# `publish` list. Compares this checkout with wilco `main` at run time, so a ci PR that carries a
+# gate change is red until the matching wilco PR has merged, and a ci main that lags wilco goes red
+# on the weekly run.
 # Fails closed: an unreadable side is drift.
-# The wilco checkout uses the release app token, scoped to wilco. If the app cannot read wilco,
-# the checkout step fails and so does this check (nothing passes unread).
+#
+# NOT a required check: it is red whenever wilco main is ahead of ci (normal until the sync PR
+# merges), so requiring it would block unrelated ci PRs. Treat red as a prompt to look at the
+# sync PR (sync/wilco-ci-review).
+# The wilco checkout uses the release app token, scoped to wilco and read-only. If the app cannot
+# read wilco, the checkout step fails and so does this check (nothing passes unread).
 
 name: Wilco sync check
 
@@ -15,6 +20,8 @@ on:
       - scripts/lib/**
       - .github/scripts/check-wilco-sync.ts
       - .github/workflows/wilco-sync-check.yml
+  schedule:
+    - cron: "17 6 * * 1" # Mondays 06:17 UTC
   workflow_dispatch:
 
 permissions:
@@ -33,9 +40,12 @@ jobs:
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: wilco
+          permission-contents: read
 
       - name: Checkout ci
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Checkout wilco main
         uses: actions/checkout@v4
@@ -44,10 +54,10 @@ jobs:
           ref: main
           path: .wilco
           token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: false
           sparse-checkout: |
-            scripts/ci-review.ts
-            scripts/lib/
-            rules/terse-briefings.md
+            scripts/
+            rules/
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2

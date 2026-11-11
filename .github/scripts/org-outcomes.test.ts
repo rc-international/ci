@@ -11,14 +11,26 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { validateOrgOutcomes } from "../../scripts/lib/org-outcomes";
+import { parse } from "yaml";
+import {
+	loadOrgOutcomeIds,
+	validateOrgOutcomes,
+} from "../../scripts/lib/org-outcomes";
 
 const FILE = join(import.meta.dir, "../../outcomes/org.yaml");
-const doc = Bun.YAML.parse(readFileSync(FILE, "utf8")) as {
+const doc = parse(readFileSync(FILE, "utf8")) as {
 	outcomes: Record<string, unknown>[];
 };
 
+// Parsed with the `yaml` package, the same parser the review gate uses in production, so a
+// file that Bun's YAML accepts but `yaml` rejects (or reads differently) cannot pass here.
 describe("outcomes/org.yaml", () => {
+	test("loads through the production loader: 20 ids, no error", async () => {
+		const out = await loadOrgOutcomeIds(FILE, { required: true });
+		expect(out.error).toBeUndefined();
+		expect(out.ids?.size).toBe(20);
+	});
+
 	test("passes the loader schema (types, measure or blocker, unique oNN ids)", () => {
 		expect(validateOrgOutcomes(doc).problems).toEqual([]);
 	});

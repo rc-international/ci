@@ -1,0 +1,46 @@
+# Tests for the org outcome registry. A bad outcomes/org.yaml or a broken gate script on ci main
+# hits the code-review check of EVERY consuming repo, so it is tested before merge here.
+# (lefthook's pre-push is client-side only and bypassable; this repo had no CI test job.)
+# Runs only the registry and workflow-wiring tests: the full suite needs a gitleaks binary.
+
+name: Org outcomes tests
+
+on:
+  pull_request:
+    paths:
+      - outcomes/**
+      - scripts/ci-review.ts
+      - scripts/lib/**
+      - .github/workflows/code-review.yml
+      - .github/workflows/org-outcomes-tests.yml
+      - .github/workflows/wilco-sync-check.yml
+      - .github/scripts/org-outcomes.test.ts
+      - .github/scripts/code-review-wiring.test.ts
+      - package.json
+      - bun.lock
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  org-outcomes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # package.json declares `yaml`, the parser the review gate itself uses.
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      - name: Test registry and workflow wiring
+        run: bun test ./.github/scripts/org-outcomes.test.ts ./.github/scripts/code-review-wiring.test.ts

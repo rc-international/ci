@@ -223,6 +223,8 @@ pre-push:
           echo "ERROR: bun is required to run the tests (eval/, .github/scripts/)." >&2
           exit 1
         fi
+        # package.json declares `yaml`, imported by the org-outcomes tests.
+        bun install --frozen-lockfile || exit 1
         bun test eval .github/scripts || exit 1
     session-review:
       # Deterministic finding-based review gate (wilco scripts/pre-push-session-review.ts;
