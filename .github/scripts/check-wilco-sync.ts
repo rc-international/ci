@@ -5,31 +5,33 @@
  * copy differs from wilco's, and fails closed when either side cannot be read.
  *
  * Usage: bun .github/scripts/check-wilco-sync.ts <wilco-checkout> [ci-checkout=.]
- * Keep PAIRS equal to the `publish` lines of wilco scripts/sync-ci.sh.
+ * The file list is wilco's own scripts/sync-ci.sh `publish` list (one source, no copy here).
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-/** [path in wilco, path in ci] */
-export const PAIRS: readonly (readonly [string, string])[] = [
-	["scripts/ci-review.ts", "scripts/ci-review.ts"],
-	["scripts/lib/review-prompt.ts", "scripts/lib/review-prompt.ts"],
-	["scripts/lib/impact-score.ts", "scripts/lib/impact-score.ts"],
-	["scripts/lib/stream-chat.ts", "scripts/lib/stream-chat.ts"],
-	["scripts/lib/commit-author-guard.ts", "scripts/lib/commit-author-guard.ts"],
-	[
-		"scripts/lib/ci-review-determinism.ts",
-		"scripts/lib/ci-review-determinism.ts",
-	],
-	["scripts/lib/outcome-lines.ts", "scripts/lib/outcome-lines.ts"],
-	["scripts/lib/org-outcomes.ts", "scripts/lib/org-outcomes.ts"],
-	["rules/terse-briefings.md", "scripts/lib/terse-briefings.md"],
-];
+/**
+ * The [path in wilco, path in ci] pairs, read from the `publish <wilco path> <ci path>` lines of
+ * wilco's scripts/sync-ci.sh, so a newly published file is compared without editing this check.
+ */
+export function pairsFromSyncScript(text: string): [string, string][] {
+	return [...text.matchAll(/^publish (\S+) (\S+)$/gm)].map((m) => [m[1], m[2]]);
+}
 
 /** One message per pair that differs or cannot be read. Empty = the copies are identical. */
 export function findDrift(wilcoRoot: string, ciRoot: string): string[] {
+	const syncScript = join(wilcoRoot, "scripts/sync-ci.sh");
+	if (!existsSync(syncScript))
+		return [
+			`scripts/sync-ci.sh: missing in wilco checkout ${wilcoRoot} (cannot know what to compare)`,
+		];
+	const pairs = pairsFromSyncScript(readFileSync(syncScript, "utf8"));
+	if (pairs.length === 0)
+		return [
+			"scripts/sync-ci.sh: no `publish <wilco path> <ci path>` lines found (cannot compare)",
+		];
 	const out: string[] = [];
-	for (const [w, c] of PAIRS) {
+	for (const [w, c] of pairs) {
 		const wf = join(wilcoRoot, w);
 		const cf = join(ciRoot, c);
 		if (!existsSync(wf)) {
@@ -66,5 +68,5 @@ if (import.meta.main) {
 		);
 		process.exit(1);
 	}
-	console.log(`ci copies match wilco (${PAIRS.length} files)`);
+	console.log("ci copies match wilco (every file in wilco scripts/sync-ci.sh)");
 }
