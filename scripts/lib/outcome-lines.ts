@@ -478,10 +478,18 @@ export interface OutcomeCheckOptions {
    * checked for them. Null/undefined: no org registry was loaded, so no org check runs.
    */
   orgIds?: ReadonlySet<string> | null
+  /**
+   * True when the org registry exists but could not be loaded (the caller reports that once).
+   * Org-looking ids (`oNN_...`) are then not flagged as unknown: they cannot be checked.
+   */
+  orgUnavailable?: boolean
   /** Paths changed by the PR, for the decision `paths` rule. */
   changedFiles?: string[]
   severity?: OutcomeSeverity
 }
+
+/** An id shaped like an org outcome id (`o01_registration_rate`). */
+const ORG_ID_RE = /^o\d{2}_/
 
 const finding = (
   severity: ReviewFinding['severity'],
@@ -638,9 +646,15 @@ export function checkBusinessOutcomes(
       )
     const checkKpiGate = (kpi: string | undefined, gate: string | undefined) => {
       if (!kpi) return
-      if (orgIds?.has(kpi)) return // org outcomes carry no gates
+      if (orgIds?.has(kpi)) return // org outcomes carry no gates; the `via` rule is below
       const gates = reg?.kpis.get(kpi)
-      if (!gates) return miss('kpi', kpi, '')
+      if (!gates) {
+        // No local registry: the repo's own kpi names were never checked, so only ids that look
+        // like org ids are. Org registry unusable: an org-looking id cannot be judged either.
+        if (!reg && !ORG_ID_RE.test(kpi)) return
+        if (opts.orgUnavailable && ORG_ID_RE.test(kpi)) return
+        return miss('kpi', kpi, '')
+      }
       if (gate && !gates.has(gate)) miss('gate', gate, ` for kpi \`${kpi}\``)
     }
     const checkActivation = (from: string | undefined) => {
@@ -657,6 +671,16 @@ export function checkBusinessOutcomes(
       if (!p.ok) continue
       const l = p.line
       if (l.kind === 'business' && !l.none) {
+        // Feeds needs `via <gate>` by grammar, so only a Business outcome line can drop it.
+        if (l.kpi && l.gate && orgIds?.has(l.kpi))
+          out.push(
+            finding(
+              sev,
+              S,
+              `Org outcome \`${l.kpi}\` has no gates, so \`via ${l.gate}\` cannot be checked${adv}.`,
+              `Drop \`via ${l.gate}\`: \`Business outcome: ${l.kpi} ${l.dir ?? '↑'} within <N>d\`.`
+            )
+          )
         checkKpiGate(l.kpi, l.gate)
         checkActivation(l.from)
       } else if (l.kind === 'feeds') checkKpiGate(l.kpi, l.gate)

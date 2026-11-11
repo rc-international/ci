@@ -67,7 +67,7 @@ import { streamChatCompletion } from './lib/stream-chat.js'
  * Org-wide outcome registry. On the runner this file sits beside scripts/ in the sparse `.ci`
  * checkout of the ci repo; wilco has none (absent is a skip unless CI_ORG_OUTCOMES_REQUIRED=1).
  */
-const DEFAULT_ORG_OUTCOMES_FILE = join(import.meta.dir, '..', 'outcomes', 'org.yaml')
+export const DEFAULT_ORG_OUTCOMES_FILE = join(import.meta.dir, '..', 'outcomes', 'org.yaml')
 
 const REVIEW_ENDPOINT =
   process.env.CI_REVIEW_ENDPOINT || 'https://api.deepinfra.com/v1/openai/chat/completions'
@@ -969,15 +969,15 @@ async function resolveOutcomeFindings(input: {
   rawDiff: string
   commitMessages: string[]
   root: string
-  /** Org outcome registry file (ci outcomes/org.yaml). Defaults to the one beside this script. */
-  orgFile?: string
-  /** True on the CI runner: a missing org file is then a finding, not a skip. */
-  orgRequired?: boolean
 }): Promise<ReviewFinding[]> {
   const { registry, error } = await loadOutcomeRegistry(input.root)
-  const org = await loadOrgOutcomeIds(input.orgFile ?? DEFAULT_ORG_OUTCOMES_FILE, {
-    required: input.orgRequired,
-  })
+  // Org registry settings come from the environment (the workflow sets them), never from callers:
+  // CI_ORG_OUTCOMES_FILE overrides the default path; CI_ORG_OUTCOMES_REQUIRED=1 makes a missing
+  // file a finding instead of a skip.
+  const org = await loadOrgOutcomeIds(
+    process.env.CI_ORG_OUTCOMES_FILE || DEFAULT_ORG_OUTCOMES_FILE,
+    { required: process.env.CI_ORG_OUTCOMES_REQUIRED === '1' }
+  )
   const findings: ReviewFinding[] = []
   if (org.error) {
     console.warn(`[ci-review] ${org.error}`)
@@ -1008,6 +1008,7 @@ async function resolveOutcomeFindings(input: {
       registry,
       // A broken repo registry skips id checks (error finding above); do not flag its ids as unknown.
       orgIds: error ? null : org.ids,
+      orgUnavailable: Boolean(org.error),
       changedFiles: diffChangedPaths(input.rawDiff),
     }),
     ...checkRegistryChanges(input.rawDiff, { registry }),
@@ -1270,7 +1271,6 @@ async function main(): Promise<void> {
     rawDiff,
     commitMessages: getPrCommitFullMessages(prNumber),
     root: process.cwd(),
-    orgRequired: process.env.CI_ORG_OUTCOMES_REQUIRED === '1',
   }))
   if (outcomeFindings.length > 0) {
     console.warn(
