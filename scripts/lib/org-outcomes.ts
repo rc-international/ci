@@ -27,6 +27,8 @@ const nonEmpty = (v: unknown): v is string => typeof v === 'string' && v.trim() 
 export function validateOrgOutcomes(doc: unknown): { ids: string[]; problems: string[] } {
   if (!isRec(doc) || !Array.isArray(doc.outcomes))
     return { ids: [], problems: ['org registry root must be a mapping with an `outcomes` list'] }
+  if (doc.outcomes.length === 0)
+    return { ids: [], problems: ['`outcomes` is empty, so every org outcome id would be unknown'] }
   const problems: string[] = []
   const ids: string[] = []
   const seen = new Set<string>()
