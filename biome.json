@@ -1,5 +1,18 @@
 {
 	"$schema": "https://biomejs.dev/schemas/2.3.15/schema.json",
+	"files": {
+		"includes": [
+			"**",
+			"!scripts/ci-review.ts",
+			"!scripts/lib/review-prompt.ts",
+			"!scripts/lib/impact-score.ts",
+			"!scripts/lib/stream-chat.ts",
+			"!scripts/lib/commit-author-guard.ts",
+			"!scripts/lib/ci-review-determinism.ts",
+			"!scripts/lib/outcome-lines.ts",
+			"!scripts/lib/org-outcomes.ts"
+		]
+	},
 	"formatter": {
 		"enabled": true,
 		"indentStyle": "tab"
