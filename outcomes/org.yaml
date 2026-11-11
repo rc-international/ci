@@ -1,0 +1,248 @@
+# Org-wide business outcomes: the owner's 20 outcomes, one registry for every repo.
+#
+# Source: owner message 2026-11-11 (verbatim list in the plan below).
+# Plan:   /home/kev/thoughts/shared/plans/wilco/2026-11-11-business-outcome-tracking-20.md
+#         (section 0 = the 20 outcomes, section 3 C1 = this file's schema, section 4 step 1).
+#
+# Read by the PR outcome gate (wilco scripts/ci-review.ts, published to this repo by
+# scripts/sync-ci.sh): a PR names one by id on `Business outcome:` / `Feeds:`.
+# Repo-local ids in config/business_outcomes.yaml keep working beside these.
+# Schema is enforced by scripts/lib/org-outcomes.ts and .github/scripts/org-outcomes.test.ts
+# (unique `oNN_snake_name` ids, known `type`, `measure` or `blocker`, exactly 20 entries).
+#
+# Fields
+#   week          1 or 2 (the owner's delivery week)
+#   statement     the owner's wording
+#   target        the owner's target. `target_source: estimate` = a rough industry estimate,
+#                 not our data. Replace with a measured baseline when week 1 closes.
+#   type          measured | unmeasured | milestone | human_reported
+#   measure       {adapter, description}: where the daily value comes from
+#   blocker       why there is no data source yet (the data-source gap of plan section 1)
+#   owner_repos   repos whose sessions build or move the outcome
+#   window_days   tracking window after a PR merges
+#
+# INFERRED, not verified here: the data-source survey in plan section 1 (scout survey), the
+# owner_repos, and the type of o10 (the plan's C1 list does not assign one).
+
+outcomes:
+  - id: o01_registration_rate
+    week: 1
+    statement: Registration conversion rate
+    target: "1 registration / 100 emails (range 0.5-2)"
+    target_source: estimate
+    type: measured
+    measure:
+      adapter: valors-invite
+      description: "invites.registration_completed_at count divided by email_sends count, 7-day rolling, per 100 emails"
+    owner_repos: [valors-invite]
+    window_days: 30
+
+  - id: o02_email_ctr
+    week: 1
+    statement: Email click-through rate
+    target: "3% of delivered (range 1-5%)"
+    target_source: estimate
+    type: measured
+    measure:
+      adapter: valors-invite
+      description: "invites.clicked_at / email.clicked events. Gap: email.delivered is declared but never written, so the delivered denominator is not available yet; until Smartlead webhooks land the rate is per send, not per delivered"
+    owner_repos: [valors-invite]
+    window_days: 30
+
+  - id: o03_sms_ctr
+    week: 1
+    statement: SMS click-through rate
+    target: "10% (range 5-15%), opted-in numbers only (LGPD / POPIA risk)"
+    target_source: estimate
+    type: unmeasured
+    blocker: "No SMS provider and no consent basis; no SMS code found in the outreach repos"
+    owner_repos: [valors-invite]
+    window_days: 30
+
+  - id: o04_google_index
+    week: 1
+    statement: Google index
+    target: "indexed / published article pages >= 80% for pages >= 7 d old"
+    target_source: estimate
+    type: unmeasured
+    blocker: "No GSC performance or index-coverage data; only sitemap submit exists. Needs Search Console access (D3)"
+    owner_repos: [ArticleMaker, Carticles]
+    window_days: 30
+
+  - id: o05_engagement_rate
+    week: 1
+    statement: Engagement rate
+    target: "GA4 engaged sessions / sessions on articles"
+    target_source: estimate
+    type: unmeasured
+    blocker: "No GA4 client or property access (D3)"
+    owner_repos: [Carticles]
+    window_days: 30
+
+  - id: o06_daily_email_campaign
+    week: 1
+    statement: Daily email campaign
+    target: "100 sends every day"
+    target_source: estimate
+    type: measured
+    measure:
+      adapter: valors-invite
+      description: "email_sends rows per UTC day; the daily value must be >= 100 on every day"
+    owner_repos: [valors-invite]
+    window_days: 30
+
+  - id: o07_funnel_reporting
+    week: 1
+    statement: Funnel reporting
+    target: "dashboard live: sent -> delivered -> clicked -> registered"
+    target_source: estimate
+    type: milestone
+    measure:
+      adapter: evidence-link
+      description: "Done when the dashboard URL is live and shows all four funnel stages; evidence = the dashboard link. The delivered stage depends on o02's missing email.delivered events"
+    owner_repos: [valors-invite]
+    window_days: 30
+
+  - id: o08_preview_links_traffic
+    week: 1
+    statement: Preview links drive article traffic
+    target: "UTM-tagged preview -> article clicks"
+    target_source: estimate
+    type: unmeasured
+    blocker: "No UTM tags on preview links found in any repo, so there is no click series to read"
+    owner_repos: [valors-invite, Carticles]
+    window_days: 30
+
+  - id: o09_deliverability_health
+    week: 1
+    statement: Deliverability health
+    target: "bounce < 2%, complaints < 0.1%, SPF/DKIM/DMARC set"
+    target_source: estimate
+    type: unmeasured
+    blocker: "email.complained is declared but never written; no automated SPF/DKIM/DMARC check (manual runbook only); Smartlead webhooks pending (D3)"
+    owner_repos: [valors-invite]
+    window_days: 30
+
+  - id: o10_revenue_signal
+    week: 1
+    statement: Revenue signal
+    target: "1 paying customer or 1 business claims/edits its page"
+    target_source: estimate
+    type: milestone
+    measure:
+      adapter: valors-invite
+      description: "First edit.applied event counts as the claim/edit signal; evidence = the event row. The paying-customer half needs a payment provider (see o14)"
+    owner_repos: [valors-invite]
+    window_days: 30
+
+  - id: o11_send_volume_200
+    week: 2
+    statement: Send volume 100 -> 200/day
+    target: "bounce < 2%, complaints < 0.1% at the new volume"
+    target_source: estimate
+    type: unmeasured
+    blocker: "Bounce and complaint events are not recorded (email.complained never written); Smartlead webhooks pending (D3)"
+    owner_repos: [valors-invite]
+    window_days: 30
+
+  - id: o12_ab_test_winner
+    week: 2
+    statement: One A/B test with a winner
+    target: ">= 300 sends per variant"
+    target_source: estimate
+    type: milestone
+    measure:
+      adapter: evidence-link
+      description: "Done when one A/B test has >= 300 sends per variant and a declared winner; evidence = the test summary link"
+    owner_repos: [valors-invite]
+    window_days: 30
+
+  - id: o13_activation_rate
+    week: 2
+    statement: Activation rate
+    target: "% of registrations that claim/edit within 48 h"
+    target_source: estimate
+    type: measured
+    measure:
+      adapter: valors-invite
+      description: "registrations with an edit.applied event within 48 h of registration_completed_at, divided by registrations. Partial: depends on edit.applied coverage"
+    owner_repos: [valors-invite]
+    window_days: 30
+
+  - id: o14_paid_conversion
+    week: 2
+    statement: First revenue / paid conversion
+    target: "registered -> paid %, revenue R$ / R"
+    target_source: estimate
+    type: unmeasured
+    blocker: "No payment provider chosen or integrated (Stripe appears only in page-builder-api mocks and valors-companion .env.example, unverified)"
+    owner_repos: [valors-invite]
+    window_days: 30
+
+  - id: o15_speed_to_lead
+    week: 2
+    statement: Speed to lead
+    target: "every human reply answered < 1 h in business hours"
+    target_source: estimate
+    type: human_reported
+    measure:
+      adapter: wilco-outcome-report
+      description: "Weekly manual entry via `wilco outcome report`: replies received, replies answered within 1 h in business hours. Automated once Smartlead reply webhooks exist (D3)"
+    owner_repos: [valors-invite]
+    window_days: 30
+
+  - id: o16_organic_search_traffic
+    week: 2
+    statement: Organic search traffic
+    target: "GSC impressions + clicks on article pages"
+    target_source: estimate
+    type: unmeasured
+    blocker: "No GSC performance data; only sitemap submit exists. Needs Search Console access (D3)"
+    owner_repos: [ArticleMaker, Carticles]
+    window_days: 30
+
+  - id: o17_segment_performance
+    week: 2
+    statement: Segment performance
+    target: "conversion by city (Rio, SP, ZA) and category"
+    target_source: estimate
+    type: measured
+    measure:
+      adapter: valors-invite
+      description: "o01 registration conversion grouped by business city (Rio, SP, ZA) and category"
+    owner_repos: [valors-invite, darena]
+    window_days: 30
+
+  - id: o18_cost_per_registration
+    week: 2
+    statement: Cost per registration
+    target: "(data + proxies + tools + staff hours) / registrations"
+    target_source: estimate
+    type: unmeasured
+    blocker: "No cost source for proxies, data or tools, and no staff-hours record"
+    owner_repos: [darena, valors-invite]
+    window_days: 30
+
+  - id: o19_customer_conversations
+    week: 2
+    statement: Customer conversations
+    target: "5 calls with registered businesses + written summary"
+    target_source: estimate
+    type: human_reported
+    measure:
+      adapter: wilco-outcome-report
+      description: "Weekly manual entry via `wilco outcome report`: calls held with registered businesses, link to the written summary"
+    owner_repos: [valors-invite]
+    window_days: 30
+
+  - id: o20_article_freshness_quality
+    week: 2
+    statement: Article freshness and quality
+    target: "100% campaign businesses rescraped before article, 0 factual complaints"
+    target_source: estimate
+    type: measured
+    measure:
+      adapter: darena
+      description: "darena campaign measures D23/D24 (rescrape before article). Partial: the ArticleMaker capture gate is behind a flag that is off, and factual complaints have no source"
+    owner_repos: [darena, ArticleMaker]
+    window_days: 30
