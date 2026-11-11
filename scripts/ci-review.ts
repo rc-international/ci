@@ -25,6 +25,7 @@
 
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import type { Nodes, Root } from 'mdast'
 import { fromMarkdown } from 'mdast-util-from-markdown'
 import { toString as mdastToString } from 'mdast-util-to-string'
@@ -41,6 +42,7 @@ import {
 } from './lib/ci-review-determinism.js'
 import { type CommitAuthor, checkCommitAuthors } from './lib/commit-author-guard.js'
 import { computeImpactScore, formatImpactScore, type ImpactScore } from './lib/impact-score.js'
+import { loadOrgOutcomeIds } from './lib/org-outcomes.js'
 import {
   BUSINESS_OUTCOMES_SECTION,
   checkBusinessOutcomes,
@@ -60,6 +62,12 @@ import {
 import { streamChatCompletion } from './lib/stream-chat.js'
 
 // ── Configuration ────────────────────────────────────────────────────────────
+
+/**
+ * Org-wide outcome registry. On the runner this file sits beside scripts/ in the sparse `.ci`
+ * checkout of the ci repo; wilco has none (absent is a skip unless CI_ORG_OUTCOMES_REQUIRED=1).
+ */
+export const DEFAULT_ORG_OUTCOMES_FILE = join(import.meta.dir, '..', 'outcomes', 'org.yaml')
 
 const REVIEW_ENDPOINT =
   process.env.CI_REVIEW_ENDPOINT || 'https://api.deepinfra.com/v1/openai/chat/completions'
@@ -963,7 +971,26 @@ async function resolveOutcomeFindings(input: {
   root: string
 }): Promise<ReviewFinding[]> {
   const { registry, error } = await loadOutcomeRegistry(input.root)
+  // Org registry settings come from the environment (the workflow sets them), never from callers:
+  // CI_ORG_OUTCOMES_FILE overrides the default path; CI_ORG_OUTCOMES_REQUIRED=1 makes a missing
+  // file a finding instead of a skip.
+  const org = await loadOrgOutcomeIds(
+    process.env.CI_ORG_OUTCOMES_FILE || DEFAULT_ORG_OUTCOMES_FILE,
+    { required: process.env.CI_ORG_OUTCOMES_REQUIRED === '1' }
+  )
   const findings: ReviewFinding[] = []
+  if (org.error) {
+    console.warn(`[ci-review] ${org.error}`)
+    findings.push({
+      file: 'PR_BODY',
+      severity: OUTCOME_FINDINGS_SEVERITY,
+      category: 'pr-structure',
+      description: `The org outcome registry could not be used, so org outcome ids were not checked: ${org.error.slice(0, 300)}`,
+      suggested_fix:
+        'Fix outcomes/org.yaml in the ci repo, or the review workflow checkout that carries it.',
+      line_range: BUSINESS_OUTCOMES_SECTION,
+    })
+  }
   if (error) {
     console.warn(`[ci-review] Outcome registry unusable; id checks skipped: ${error}`)
     findings.push({
@@ -979,6 +1006,9 @@ async function resolveOutcomeFindings(input: {
   findings.push(
     ...checkBusinessOutcomes(input.prBody, {
       registry,
+      // A broken repo registry skips id checks (error finding above); do not flag its ids as unknown.
+      orgIds: error ? null : org.ids,
+      orgUnavailable: Boolean(org.error),
       changedFiles: diffChangedPaths(input.rawDiff),
     }),
     ...checkRegistryChanges(input.rawDiff, { registry }),

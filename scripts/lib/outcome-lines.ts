@@ -306,6 +306,12 @@ export interface OutcomeRegistry {
   kpis: Map<string, Set<string>>
   /** decision id -> path globs */
   decisions: Map<string, string[]>
+  /**
+   * decision id -> the raw registry record (status, statement, evidence, check, ...).
+   * The PR gate reads only `status` from it; the nightly decision sweep reads the rest,
+   * so there is exactly one registry parser. Optional: hand-built registries may omit it.
+   */
+  records?: Map<string, Record<string, unknown>>
   /** activation id -> kind (flag|deploy|run). null = the registry has no activations section. */
   activations: Map<string, string> | null
   /** Registry defects found at load time (e.g. a decision with empty `paths`); each becomes a finding. */
@@ -315,6 +321,9 @@ export interface OutcomeRegistry {
 type Yaml = Record<string, unknown>
 const asRecords = (v: unknown): Yaml[] =>
   Array.isArray(v) ? v.filter((x): x is Yaml => typeof x === 'object' && x !== null) : []
+/** `status: withdrawn` marks a decision the owner retired: it is history, not a live guard. */
+export const isWithdrawn = (record: Record<string, unknown> | undefined): boolean =>
+  typeof record?.status === 'string' && record.status.trim().toLowerCase() === 'withdrawn'
 const asStrings = (v: unknown): string[] =>
   Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []
 const gateIds = (v: unknown): string[] =>
@@ -421,6 +430,7 @@ export async function loadOutcomeRegistry(
         registry: {
           kpis: new Map(asRecords(y.kpis).map((k) => [String(k.id), new Set(gateIds(k.gates))])),
           decisions: new Map(decisions.map((d) => [String(d.id), asStrings(d.paths)])),
+          records: new Map(decisions.map((d) => [String(d.id), d])),
           activations: Array.isArray(y.activations)
             ? new Map(asRecords(y.activations).map((a) => [String(a.id), String(a.kind ?? '')]))
             : null,
@@ -430,15 +440,17 @@ export async function loadOutcomeRegistry(
     }
     const kpis = new Map<string, Set<string>>()
     const decisions = new Map<string, string[]>()
+    const records = new Map<string, Yaml>()
     const activations = new Map<string, string>()
     const stem = (f: string) => basename(f).replace(/\.ya?ml$/, '')
     for (const f of yamlFiles(join(splitDir, 'kpis')))
       kpis.set(stem(f), new Set(gateIds(readYaml(parse, join(splitDir, 'kpis', f)).gates)))
     for (const f of yamlFiles(join(splitDir, 'decisions'))) {
-      const paths = readYaml(parse, join(splitDir, 'decisions', f)).paths
-      const prob = pathsProblem(stem(f), paths)
+      const record = readYaml(parse, join(splitDir, 'decisions', f))
+      const prob = pathsProblem(stem(f), record.paths)
       if (prob) problems.push(prob)
-      decisions.set(stem(f), asStrings(paths))
+      decisions.set(stem(f), asStrings(record.paths))
+      records.set(stem(f), record)
     }
     for (const f of yamlFiles(join(splitDir, 'activations')))
       activations.set(stem(f), String(readYaml(parse, join(splitDir, 'activations', f)).kind ?? ''))
@@ -446,6 +458,7 @@ export async function loadOutcomeRegistry(
       registry: {
         kpis,
         decisions,
+        records,
         activations: existsSync(join(splitDir, 'activations')) ? activations : null,
         problems,
       },
@@ -459,10 +472,24 @@ export async function loadOutcomeRegistry(
 
 export interface OutcomeCheckOptions {
   registry?: OutcomeRegistry | null
+  /**
+   * Org-wide outcome ids (ci outcomes/org.yaml). Accepted as a kpi beside the repo registry's
+   * kpis, in repos with or without a registry. They carry no gates, so `via <gate>` is not
+   * checked for them. Null/undefined: no org registry was loaded, so no org check runs.
+   */
+  orgIds?: ReadonlySet<string> | null
+  /**
+   * True when the org registry exists but could not be loaded (the caller reports that once).
+   * Org-looking ids (`oNN_...`) are then not flagged as unknown: they cannot be checked.
+   */
+  orgUnavailable?: boolean
   /** Paths changed by the PR, for the decision `paths` rule. */
   changedFiles?: string[]
   severity?: OutcomeSeverity
 }
+
+/** An id shaped like an org outcome id (`o01_registration_rate`). */
+const ORG_ID_RE = /^o\d{2}_/
 
 const finding = (
   severity: ReviewFinding['severity'],
@@ -603,9 +630,11 @@ export function checkBusinessOutcomes(
       )
   }
 
-  // Registry-backed checks (only when the repo has a registry).
+  // Registry-backed checks (only when the repo has a registry or an org registry was loaded).
+  // Decision, activation and glob rules need the repo registry (`reg`); the kpi rule needs either.
   const reg = opts.registry
-  if (reg) {
+  const orgIds = opts.orgIds
+  if (reg || orgIds) {
     const miss = (what: string, id: string, hint: string) =>
       out.push(
         finding(
@@ -617,12 +646,19 @@ export function checkBusinessOutcomes(
       )
     const checkKpiGate = (kpi: string | undefined, gate: string | undefined) => {
       if (!kpi) return
-      const gates = reg.kpis.get(kpi)
-      if (!gates) return miss('kpi', kpi, '')
+      if (orgIds?.has(kpi)) return // org outcomes carry no gates; the `via` rule is below
+      const gates = reg?.kpis.get(kpi)
+      if (!gates) {
+        // No local registry: the repo's own kpi names were never checked, so only ids that look
+        // like org ids are. Org registry unusable: an org-looking id cannot be judged either.
+        if (!reg && !ORG_ID_RE.test(kpi)) return
+        if (opts.orgUnavailable && ORG_ID_RE.test(kpi)) return
+        return miss('kpi', kpi, '')
+      }
       if (gate && !gates.has(gate)) miss('gate', gate, ` for kpi \`${kpi}\``)
     }
     const checkActivation = (from: string | undefined) => {
-      if (!from || !reg.activations) return
+      if (!from || !reg?.activations) return
       const [kind, id] = from.includes(':')
         ? (from.split(':') as [string, string])
         : [undefined, from]
@@ -635,16 +671,26 @@ export function checkBusinessOutcomes(
       if (!p.ok) continue
       const l = p.line
       if (l.kind === 'business' && !l.none) {
+        // Feeds needs `via <gate>` by grammar, so only a Business outcome line can drop it.
+        if (l.kpi && l.gate && orgIds?.has(l.kpi))
+          out.push(
+            finding(
+              sev,
+              S,
+              `Org outcome \`${l.kpi}\` has no gates, so \`via ${l.gate}\` cannot be checked${adv}.`,
+              `Drop \`via ${l.gate}\`: \`Business outcome: ${l.kpi} ${l.dir ?? '↑'} within <N>d\`.`
+            )
+          )
         checkKpiGate(l.kpi, l.gate)
         checkActivation(l.from)
       } else if (l.kind === 'feeds') checkKpiGate(l.kpi, l.gate)
       else if (l.kind === 'leading') checkActivation(l.from)
-      else if (l.kind === 'decision' && l.decision && !reg.decisions.has(l.decision))
+      else if (l.kind === 'decision' && l.decision && reg && !reg.decisions.has(l.decision))
         miss('decision', l.decision, '')
     }
 
     // A decision with empty / non-array `paths` guards nothing: say so instead of skipping it.
-    for (const prob of reg.problems ?? [])
+    for (const prob of reg?.problems ?? [])
       out.push(
         finding(
           sev,
@@ -661,8 +707,10 @@ export function checkBusinessOutcomes(
       )
     )
     const badGlobs = new Set<string>()
-    for (const [id, globs] of reg.decisions) {
+    for (const [id, globs] of reg?.decisions ?? []) {
       if (declared.has(id)) continue
+      // A withdrawn decision guards nothing; its id stays known above so a reference is not "unregistered".
+      if (isWithdrawn(reg?.records?.get(id))) continue
       const hit = (opts.changedFiles ?? []).find((f) =>
         globs.some((g) => globMatches(g, f, badGlobs))
       )
@@ -677,7 +725,7 @@ export function checkBusinessOutcomes(
         )
     }
     // Reported even for declared decisions: the glob guards nothing either way.
-    for (const g of reg.decisions.values()) for (const x of g) globMatches(x, '', badGlobs)
+    for (const g of reg?.decisions.values() ?? []) for (const x of g) globMatches(x, '', badGlobs)
     for (const g of badGlobs)
       out.push(
         finding(
@@ -750,7 +798,9 @@ export const diffChangedPaths = (rawDiff: string): string[] => [
 ]
 
 const isRegistryPath = (p: string): boolean =>
-  p === 'config/business_outcomes.yaml' || (p.startsWith('config/outcomes/') && /\.ya?ml$/.test(p))
+  p === 'config/business_outcomes.yaml' ||
+  p === 'outcomes/org.yaml' ||
+  (p.startsWith('config/outcomes/') && /\.ya?ml$/.test(p))
 
 /**
  * A PR that edits the registry is checked against its OWN registry, so deleting

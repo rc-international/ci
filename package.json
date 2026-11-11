@@ -1,0 +1,8 @@
+{
+	"name": "ci",
+	"private": true,
+	"description": "Declares only what the tests in .github/scripts import. The review scripts run without an install.",
+	"devDependencies": {
+		"yaml": "^2.3.4"
+	}
+}
