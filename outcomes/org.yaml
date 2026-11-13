@@ -1,4 +1,4 @@
-# Org-wide business outcomes: the owner's 20 outcomes, one registry for every repo.
+# Org-wide business outcomes: the owner's 20 outcomes (2026-11-11) plus o21 (2026-11-13), one registry for every repo.
 #
 # Source: owner message 2026-11-11 (verbatim list in the plan below).
 # Plan:   /home/kev/thoughts/shared/plans/wilco/2026-11-11-business-outcome-tracking-20.md
@@ -8,7 +8,7 @@
 # scripts/sync-ci.sh): a PR names one by id on `Business outcome:` / `Feeds:`.
 # Repo-local ids in config/business_outcomes.yaml keep working beside these.
 # Schema is enforced by scripts/lib/org-outcomes.ts and .github/scripts/org-outcomes.test.ts
-# (unique `oNN_snake_name` ids, known `type`, `measure` or `blocker`, exactly 20 entries).
+# (unique `oNN_snake_name` ids, known `type`, `measure` or `blocker`, exactly 21 entries).
 #
 # Fields
 #   week          1 or 2 (the owner's delivery week)
@@ -245,4 +245,21 @@ outcomes:
       adapter: darena
       description: "darena campaign measures D23/D24 (rescrape before article). Partial: the ArticleMaker capture gate is behind a flag that is off, and factual complaints have no source"
     owner_repos: [darena, ArticleMaker]
+    window_days: 30
+
+  # o21: added by the owner 2026-11-13 (session bb29bbfa) as this session's own business outcome,
+  # in the owner's words: "A business metric is assigned to every feature session that explains the
+  # why of the session and the expected result of the work. These metrics are stored and monitored
+  # for a period of 30 days post merge and exception reporting is used to ensure that the business
+  # metrics are achieved by the work."
+  - id: o21_session_outcome_accountability
+    week: 1
+    statement: Every feature session carries a business metric (its why and expected result), monitored 30 days after merge, with exception reporting when the work does not achieve it
+    target: "100% of feature sessions have an outcome; 100% of merged PRs carry an outcome line; every outcome-claiming PR gets day-7 and day-30 checkpoints; every miss raises an exception report"
+    target_source: estimate
+    type: measured
+    measure:
+      adapter: wilco-db
+      description: "Session coverage = interactive companion sessions with a non-none session_outcomes row / interactive sessions created (job_kind is null). PR coverage = merged PRs with a valid Business outcome line / merged PRs. Checkpoint coverage and exception reports come from pr_outcome_checkpoints, specified in plan 2026-11-11-business-outcome-tracking-20.md section 3 C4 and delivered by its section 4 steps 4-5; until that table exists these two parts read unmeasured"
+    owner_repos: [wilco, ci]
     window_days: 30
