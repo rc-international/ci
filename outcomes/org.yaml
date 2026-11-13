@@ -260,6 +260,6 @@ outcomes:
     type: measured
     measure:
       adapter: wilco-db
-      description: "Session coverage = interactive companion sessions with a non-none session_outcomes row / interactive sessions created (job_kind is null). PR coverage = merged PRs with a valid Business outcome line / merged PRs. Checkpoint coverage and exception reports come from pr_outcome_checkpoints (tracker steps 4-5, not built yet, so those parts read unmeasured)"
+      description: "Session coverage = interactive companion sessions with a non-none session_outcomes row / interactive sessions created (job_kind is null). PR coverage = merged PRs with a valid Business outcome line / merged PRs. Checkpoint coverage and exception reports come from pr_outcome_checkpoints, specified in plan 2026-11-11-business-outcome-tracking-20.md section 3 C4 and delivered by its section 4 steps 4-5; until that table exists these two parts read unmeasured"
     owner_repos: [wilco, ci]
     window_days: 30
