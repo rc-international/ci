@@ -277,10 +277,10 @@ Respond with ONLY {"findings": [...]}, no markdown fencing, no explanation.`
 
 // ── Writing standard ─────────────────────────────────────────────────────────
 
-// rules/ in a wilco checkout; scripts/lib/ in the rc-international/ci copy,
+// docs/rules-archive/ in a wilco checkout; scripts/lib/ in the rc-international/ci copy,
 // whose reusable workflow sparse-checks-out only scripts/ci-review.ts + scripts/lib/.
 export const WRITING_STANDARD_PATHS = [
-  join(__dirname, '..', '..', 'rules', 'terse-briefings.md'),
+  join(__dirname, '..', '..', 'docs', 'rules-archive', 'terse-briefings.md'),
   join(__dirname, 'terse-briefings.md'),
 ]
 
@@ -300,7 +300,7 @@ export function extractLanguageRules(markdown: string): string | null {
 }
 
 /**
- * Load the writing standard for finding text from rules/terse-briefings.md.
+ * Load the writing standard for finding text from docs/rules-archive/terse-briefings.md.
  * Read at runtime so the gate and the rule cannot drift
  * (docs/design/review-gate-v2.md). Missing file → null; the review still runs.
  */
