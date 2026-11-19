@@ -255,7 +255,7 @@ outcomes:
   - id: o21_session_outcome_accountability
     week: 1
     statement: Every feature session carries a business metric (its why and expected result), monitored 30 days after merge, with exception reporting when the work does not achieve it
-    target: "100% of feature sessions have an outcome; 100% of merged PRs carry an outcome line; every outcome-claiming PR gets day-7 and day-30 checkpoints; every miss raises an exception report"
+    target: "E2E TEST target wording (this PR will be closed)"
     target_source: estimate
     type: measured
     measure:
