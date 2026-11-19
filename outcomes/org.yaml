@@ -263,3 +263,15 @@ outcomes:
       description: "Session coverage = interactive companion sessions with a non-none session_outcomes row / interactive sessions created (job_kind is null). PR coverage = merged PRs with a valid Business outcome line / merged PRs. Checkpoint coverage and exception reports come from pr_outcome_checkpoints, specified in plan 2026-11-11-business-outcome-tracking-20.md section 3 C4 and delivered by its section 4 steps 4-5; until that table exists these two parts read unmeasured"
     owner_repos: [wilco, ci]
     window_days: 30
+
+  # o22_e2e_test_proposal: proposed by gordon on 2026-11-19 from the companion Business Outcomes tab.
+  - id: o22_e2e_test_proposal
+    week: 1
+    statement: E2E TEST - companion Business Outcomes tab proposal (will be closed)
+    target: 1 test PR opened and closed
+    target_source: estimate
+    type: unmeasured
+    blocker: "test entry only: this PR is closed without merging"
+    owner_repos:
+      - wilco
+    window_days: 30
