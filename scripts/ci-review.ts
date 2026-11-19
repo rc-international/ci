@@ -58,6 +58,7 @@ import {
   buildReviewPrompt,
   PR_BODY_REQUIRED_SECTIONS,
   type ReviewFinding,
+  triageTag,
 } from './lib/review-prompt.js'
 import { streamChatCompletion } from './lib/stream-chat.js'
 
@@ -673,7 +674,11 @@ function formatReviewBody(rawFindings: ReviewFinding[], opts: FormatOptions): st
     lines.push('')
 
     for (const f of sevFindings) {
-      lines.push(`- **${f.file}** (${f.line_range || '?'}): ${f.description}`)
+      // L×I is display-only: CI blocking is unchanged by triage.
+      const tag = triageTag(f)
+      lines.push(
+        `- **${f.file}** (${f.line_range || '?'}): ${tag ? `${tag} ` : ''}${f.description}`
+      )
       if (f.suggested_fix) {
         lines.push(`  - Fix: ${f.suggested_fix}`)
       }
