@@ -1,4 +1,4 @@
-# Org-wide business outcomes: the owner's 20 outcomes (2026-11-11) plus o21 (2026-11-13), one registry for every repo.
+# Org-wide business outcomes: the owner's 20 outcomes (2026-11-11) plus o21 (2026-11-13) and o22 (2026-11-23), one registry for every repo.
 #
 # Source: owner message 2026-11-11 (verbatim list in the plan below).
 # Plan:   /home/kev/thoughts/shared/plans/wilco/2026-11-11-business-outcome-tracking-20.md
@@ -8,7 +8,7 @@
 # scripts/sync-ci.sh): a PR names one by id on `Business outcome:` / `Feeds:`.
 # Repo-local ids in config/business_outcomes.yaml keep working beside these.
 # Schema is enforced by scripts/lib/org-outcomes.ts and .github/scripts/org-outcomes.test.ts
-# (unique `oNN_snake_name` ids, known `type`, `measure` or `blocker`, exactly 21 entries).
+# (unique `oNN_snake_name` ids, known `type`, `measure` or `blocker`, exactly 22 entries).
 #
 # Fields
 #   week          1 or 2 (the owner's delivery week)
@@ -262,4 +262,21 @@ outcomes:
       adapter: wilco-db
       description: "Session coverage = interactive companion sessions with a non-none session_outcomes row / interactive sessions created (job_kind is null). PR coverage = merged PRs with a valid Business outcome line / merged PRs. Checkpoint coverage and exception reports come from pr_outcome_checkpoints, specified in plan 2026-11-11-business-outcome-tracking-20.md section 3 C4 and delivered by its section 4 steps 4-5; until that table exists these two parts read unmeasured"
     owner_repos: [wilco, ci]
+    window_days: 30
+
+  # o22: requested 2026-11-23 (session 22a687fe): track Third Umpire nightly spec results and the
+  # issues it files, with the goal that every spec passes every night.
+  # Data (verified 2026-11-23): nightly sweep = umpire-sweep.timer 02:00 UTC on vos-dev-vps, running
+  # `umpire run-all --specs-dir specs` in rc-international/third-umpire-v2 against bonsai.
+  # Baseline 2026-11-23 sweep: 15/24 specs passed; tu-bug issues org-wide 67 open, 78 closed.
+  - id: o22_third_umpire_nightly_green
+    week: 1
+    statement: Third Umpire nightly sweep is green - every spec passes every night, and the issues it files are fixed
+    target: "24/24 specs PASS on every nightly sweep (baseline 2026-11-23: 15/24); 0 new tu-bug issues per night; 0 open tu-bug issues (baseline 67)"
+    target_source: estimate
+    type: measured
+    measure:
+      adapter: third-umpire
+      description: "Daily, per nightly sweep: specs PASS / FAIL / BLOCKED from third-umpire-v2 umpire.db table runs (verdict, test_name, started_at), latest run per test_name in the sweep window 02:00-06:00 UTC; BLOCKED counts as not passed. Issues: GitHub issues labelled tu-bug across rc-international, opened that day and open in total (gh search issues --label tu-bug). Gaps: the adapter is not built yet (the tracker records 'adapter third-umpire not built'); umpire.db has no sweep id and no filed-issue table, so the sweep is grouped by time window and issue counts come from GitHub"
+    owner_repos: [third-umpire-v2, menu-expert, communications-expert, forecasting-expert, website-expert, how-to-expert, valors-mobile]
     window_days: 30
