@@ -58,7 +58,9 @@ import {
   buildReviewPrompt,
   PR_BODY_REQUIRED_SECTIONS,
   type ReviewFinding,
+  triageTag,
 } from './lib/review-prompt.js'
+import { checkSessionTrailers, isPrCommit, type PrCommit } from './lib/session-trailer-guard.js'
 import { streamChatCompletion } from './lib/stream-chat.js'
 
 // ── Configuration ────────────────────────────────────────────────────────────
@@ -673,7 +675,11 @@ function formatReviewBody(rawFindings: ReviewFinding[], opts: FormatOptions): st
     lines.push('')
 
     for (const f of sevFindings) {
-      lines.push(`- **${f.file}** (${f.line_range || '?'}): ${f.description}`)
+      // L×I is display-only: CI blocking is unchanged by triage.
+      const tag = triageTag(f)
+      lines.push(
+        `- **${f.file}** (${f.line_range || '?'}): ${tag ? `${tag} ` : ''}${f.description}`
+      )
       if (f.suggested_fix) {
         lines.push(`  - Fix: ${f.suggested_fix}`)
       }
@@ -801,6 +807,94 @@ function resolveCommitAuthorFindings(prNumber: string): ReviewFinding[] {
     ]
   }
   return checkCommitAuthors(result.authors)
+}
+
+// ── SESSION-trailer guard (deterministic; see lib/session-trailer-guard.ts) ──
+
+/**
+ * Fetch every PR commit via the REST API (parents + author login are not in
+ * `gh pr view --json commits`). Fails closed: a fetch error is a `high` finding.
+ */
+function resolveSessionTrailerFindings(
+  prNumber: string,
+  repo: string,
+  run: typeof execFileSync = execFileSync
+): ReviewFinding[] {
+  let commits: PrCommit[]
+  let prCreatedAt: string
+  // Fetch and shape-check inside one try: a malformed record must become a high finding, never an
+  // uncaught throw that kills the review (the JSON cast alone validates nothing).
+  try {
+    prCreatedAt = run('gh', ['api', `repos/${repo}/pulls/${prNumber}`, '--jq', '.created_at'], {
+      encoding: 'utf-8',
+      timeout: 30_000,
+    }).trim()
+    const raw = run(
+      'gh',
+      [
+        'api',
+        '--paginate',
+        `repos/${repo}/pulls/${prNumber}/commits?per_page=100`,
+        '--jq',
+        '.[] | {sha, message: .commit.message, parents: (.parents | length), authorLogin: .author.login}',
+      ],
+      { encoding: 'utf-8', timeout: 30_000, maxBuffer: 10 * 1024 * 1024 }
+    )
+    commits = raw
+      .split('\n')
+      .filter((l) => l.trim())
+      .map((l) => {
+        const rec: unknown = JSON.parse(l)
+        if (!isPrCommit(rec)) throw new Error(`malformed commit record: ${l.slice(0, 120)}`)
+        return rec
+      })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    console.warn(`[ci-review] PR commits fetch failed for #${prNumber}: ${message}`)
+    return [
+      {
+        file: 'COMMIT_TRAILERS',
+        severity: 'high',
+        category: 'session-trailer',
+        description: `The SESSION-trailer guard could not run for PR #${prNumber}: fetching commits failed (${message}). Trailer-less commits cannot be ruled out.`,
+        suggested_fix: 'Re-run the code-review workflow; verify the token can read the PR commits.',
+        line_range: 'session-trailer-guard',
+      },
+    ]
+  }
+  // A PR always has at least one commit: empty output means the fetch silently failed.
+  if (commits.length === 0) {
+    return [
+      {
+        file: 'COMMIT_TRAILERS',
+        severity: 'high',
+        category: 'session-trailer',
+        description: `The SESSION-trailer guard got zero commits for PR #${prNumber}; the fetch is treated as failed, not as a pass.`,
+        suggested_fix: 'Re-run the code-review workflow; verify the token can read the PR commits.',
+        line_range: 'session-trailer-guard',
+      },
+    ]
+  }
+  // The commits endpoint returns at most 250 commits even with --paginate; a longer PR
+  // would be checked only in part, so say so instead of passing silently.
+  if (commits.length >= 250) {
+    return [
+      {
+        file: 'COMMIT_TRAILERS',
+        severity: 'high',
+        category: 'session-trailer',
+        description: `PR #${prNumber} has ${commits.length}+ commits; the GitHub API lists at most 250, so the SESSION-trailer guard is incomplete.`,
+        suggested_fix: 'Split the PR, or verify the trailers by hand with git log.',
+        line_range: 'session-trailer-guard',
+      },
+    ]
+  }
+  const { findings, exemptions } = checkSessionTrailers(commits, {
+    prCreatedAt,
+    prCommitsUrl: `https://github.com/${repo}/pull/${prNumber}/commits`,
+  })
+  for (const e of exemptions) console.log(`[ci-review] session-trailer: ${e}`)
+  return findings
 }
 
 function getPrBody(prNumber: string): string {
@@ -1277,7 +1371,13 @@ async function main(): Promise<void> {
       `[ci-review] Business-outcome checks raised ${outcomeFindings.length} finding(s) (${outcomeFindings.map((f) => f.severity).join(',')}).`
     )
   }
-  const deterministicFindings = [...authorFindings, ...prBodyFindings, ...outcomeFindings]
+  const trailerFindings = resolveSessionTrailerFindings(prNumber, repo)
+  const deterministicFindings = [
+    ...authorFindings,
+    ...trailerFindings,
+    ...prBodyFindings,
+    ...outcomeFindings,
+  ]
 
   if (diffInfo.isEmpty) {
     console.log('[ci-review] Empty diff, skipping code review.')
@@ -1492,6 +1592,7 @@ export {
   REVIEW_MODEL,
   getPrCommitAuthors,
   resolveCommitAuthorFindings,
+  resolveSessionTrailerFindings,
   getPrBody,
   checkPrBodySections,
   resolveOutcomeFindings,
