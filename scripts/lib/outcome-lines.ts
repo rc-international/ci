@@ -299,6 +299,27 @@ function splitBody(body: string): BodyLines {
   return { parsed: true, hasSection, section, outside }
 }
 
+/**
+ * The `Business outcome:` lines of a body's `## Business Outcomes` section, each parsed with the
+ * same grammar the CI check uses (refused lines come back `ok: false` with the problem). Used by
+ * the PR checkpoint ingest (scripts/lib/outcome-checkpoints.ts), so a merged PR is read exactly
+ * as CI judged it. `parsed: false` = the Markdown parse threw.
+ */
+export function businessOutcomeLines(body: string): {
+  parsed: boolean
+  hasSection: boolean
+  lines: ParsedLine[]
+} {
+  const b = splitBody(body)
+  const lines = b.section
+    .map(parseOutcomeLine)
+    .filter(
+      (p): p is ParsedLine =>
+        p !== null && (p.ok ? p.line.kind === 'business' : p.keyword === 'Business outcome')
+    )
+  return { parsed: b.parsed, hasSection: b.hasSection, lines }
+}
+
 // ── Registry ─────────────────────────────────────────────────────────────────
 
 export interface OutcomeRegistry {

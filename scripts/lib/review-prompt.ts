@@ -33,6 +33,28 @@ export interface ReviewFinding {
   rule_id?: string // the engineering-rule id/slug the finding maps to
   evidence?: string // verbatim diff line(s) the finding is about
   failure_scenario?: string // concrete input/state → wrong outcome
+  // Bug triage (1-10 each). Optional + defensively parsed: a missing or invalid
+  // value is left undefined and the finding is never demoted on score.
+  likelihood?: number // how often failure_scenario happens in this repo's real use
+  impact?: number // how bad it is when it happens
+}
+
+/** A triage score is an integer 1-10. Anything else (string, float, 0, 11, NaN) is invalid. */
+export function parseTriageScore(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= 10 ? v : undefined
+}
+
+/** likelihood x impact, or null when either score is missing/invalid (never guess a score). */
+export function triageProduct(f: { likelihood?: unknown; impact?: unknown }): number | null {
+  const l = parseTriageScore(f.likelihood)
+  const i = parseTriageScore(f.impact)
+  return l === undefined || i === undefined ? null : l * i
+}
+
+/** Display tag for a finding's triage score, e.g. "L×I=2×3=6"; empty string when unscored. */
+export function triageTag(f: { likelihood?: unknown; impact?: unknown }): string {
+  const p = triageProduct(f)
+  return p === null ? '' : `L×I=${f.likelihood}×${f.impact}=${p}`
 }
 
 export interface ReviewPattern {
@@ -184,7 +206,9 @@ export const REVIEW_OUTPUT_SCHEMA = `Output ONLY a JSON object with a "findings"
 - "line_range": approximate line range from the diff (e.g. "+42-+55")
 - "rule_id": the engineering-rule number or a short slug this maps to (e.g. "rule-9"), when applicable
 - "evidence": the verbatim changed line(s) from the diff this finding is about, copied exactly (added or removed lines)
-- "failure_scenario": one concrete input/state that leads to the wrong outcome`
+- "failure_scenario": one concrete input/state that leads to the wrong outcome
+- "likelihood": integer 1-10, how often that failure_scenario would happen in this repo's real use (1 = almost never, a rare edge nobody hits; 10 = on every run)
+- "impact": integer 1-10, how bad it is when it happens (1 = cosmetic or self-correcting; 8-10 = data loss, a security breach, a shared service down, or deleting outside the intended scope)`
 
 // ── YAML loader ──────────────────────────────────────────────────────────────
 
@@ -277,10 +301,10 @@ Respond with ONLY {"findings": [...]}, no markdown fencing, no explanation.`
 
 // ── Writing standard ─────────────────────────────────────────────────────────
 
-// rules/ in a wilco checkout; scripts/lib/ in the rc-international/ci copy,
+// docs/rules-archive/ in a wilco checkout; scripts/lib/ in the rc-international/ci copy,
 // whose reusable workflow sparse-checks-out only scripts/ci-review.ts + scripts/lib/.
 export const WRITING_STANDARD_PATHS = [
-  join(__dirname, '..', '..', 'rules', 'terse-briefings.md'),
+  join(__dirname, '..', '..', 'docs', 'rules-archive', 'terse-briefings.md'),
   join(__dirname, 'terse-briefings.md'),
 ]
 
@@ -300,7 +324,7 @@ export function extractLanguageRules(markdown: string): string | null {
 }
 
 /**
- * Load the writing standard for finding text from rules/terse-briefings.md.
+ * Load the writing standard for finding text from docs/rules-archive/terse-briefings.md.
  * Read at runtime so the gate and the rule cannot drift
  * (docs/design/review-gate-v2.md). Missing file → null; the review still runs.
  */
