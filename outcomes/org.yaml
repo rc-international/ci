@@ -266,7 +266,7 @@ outcomes:
 
   # o22: requested 2026-11-23 (session 22a687fe): track Third Umpire nightly spec results and the
   # issues it files, with the goal that every spec passes every night.
-  # Data (verified 2026-11-23): nightly sweep = umpire-sweep.timer 02:00 UTC on vos-dev-vps, running
+  # Data (verified 2026-11-25): nightly sweep = umpire-sweep.timer 02:00 UTC on zeus, running
   # `umpire run-all --specs-dir specs` in rc-international/third-umpire-v2 against bonsai.
   # Baseline 2026-11-23 sweep: 15/24 specs passed; tu-bug issues org-wide 67 open, 78 closed.
   - id: o22_third_umpire_nightly_green
@@ -277,6 +277,6 @@ outcomes:
     type: measured
     measure:
       adapter: third-umpire
-      description: "Daily, per nightly sweep: specs PASS / FAIL / BLOCKED from third-umpire-v2 umpire.db table runs (verdict, test_name, started_at), latest run per test_name in the sweep window 02:00-06:00 UTC; BLOCKED counts as not passed. Issues: GitHub issues labelled tu-bug across rc-international, opened that day and open in total (gh search issues --label tu-bug). Gaps: the adapter is not built yet (the tracker records 'adapter third-umpire not built'); umpire.db has no sweep id and no filed-issue table, so the sweep is grouped by time window and issue counts come from GitHub"
+      description: "Daily: specs passed / total from the header of the nightly sweep report (third-umpire-v2 last-sweep.md, published to /home/shared/umpire/last-sweep.md on zeus); night D = the report generated on UTC day D+1, and BLOCKED counts as not passed. Issues: GitHub issues labelled tu-bug across rc-international, created on D and open at read time. A stale report is unmeasured, never a value. Gap: the open count has no history, so a late or repeated run reads the open count of that moment"
     owner_repos: [third-umpire-v2, menu-expert, communications-expert, forecasting-expert, website-expert, how-to-expert, valors-mobile]
     window_days: 30
