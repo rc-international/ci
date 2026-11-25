@@ -58,6 +58,7 @@ jobs:
           sparse-checkout: |
             scripts/
             rules/
+            docs/rules-archive/
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
