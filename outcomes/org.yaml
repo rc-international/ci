@@ -280,3 +280,18 @@ outcomes:
       description: "Daily, per nightly sweep: specs PASS / FAIL / BLOCKED from third-umpire-v2 umpire.db table runs (verdict, test_name, started_at), latest run per test_name in the sweep window 02:00-06:00 UTC; BLOCKED counts as not passed. Issues: GitHub issues labelled tu-bug across rc-international, opened that day and open in total (gh search issues --label tu-bug). Gaps: the adapter is not built yet (the tracker records 'adapter third-umpire not built'); umpire.db has no sweep id and no filed-issue table, so the sweep is grouped by time window and issue counts come from GitHub"
     owner_repos: [third-umpire-v2, menu-expert, communications-expert, forecasting-expert, website-expert, how-to-expert, valors-mobile]
     window_days: 30
+
+  # o23_daily_email_campaign: proposed by gordon on 2026-11-25 from the companion Business Outcomes tab.
+  - id: o23_daily_email_campaign
+    week: 1
+    statement: I want to easily be able to make a email campaign every day
+    target: 1 per day
+    target_source: estimate
+    type: human_reported
+    measure:
+      adapter: smartlead campaign once a day
+      description: 1 campaign of 100+ businesses per day
+    owner_repos:
+      - valors-admin
+      - ArticleMaker
+    window_days: 30
