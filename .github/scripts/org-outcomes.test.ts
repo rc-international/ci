@@ -28,7 +28,7 @@ describe("outcomes/org.yaml", () => {
 	test("loads through the production loader: 22 ids, no error", async () => {
 		const out = await loadOrgOutcomeIds(FILE, { required: true });
 		expect(out.error).toBeUndefined();
-		expect(out.ids?.size).toBe(22);
+		expect(out.ids?.size).toBe(23);
 	});
 
 	test("passes the loader schema (types, measure or blocker, unique oNN ids)", () => {
@@ -37,7 +37,7 @@ describe("outcomes/org.yaml", () => {
 
 	// o01..o20: owner list 2026-11-11. o21: owner session outcome 2026-11-13. o22: Third Umpire nightly 2026-11-23.
 	test("has exactly the owner's 22 outcomes, o01..o22 in order", () => {
-		expect(doc.outcomes).toHaveLength(22);
+		expect(doc.outcomes).toHaveLength(23);
 		doc.outcomes.forEach((o, i) => {
 			expect(String(o.id).slice(0, 3)).toBe(
 				`o${String(i + 1).padStart(2, "0")}`,
